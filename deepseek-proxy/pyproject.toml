@@ -1,0 +1,23 @@
+[project]
+name = "deepseek-proxy"
+version = "1.0.0"
+description = "DeepSeek 网页 API 反代，提供 OpenAI 兼容端点"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "httpx[socks]",
+    "uvicorn",
+    "pydantic",
+    "wasmtime",
+]
+
+[project.scripts]
+deepseek-proxy = "deepseek_proxy.main:cli"
+deepseek-proxy-compat = "deepseek_proxy.compat_main:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deepseek_proxy"]

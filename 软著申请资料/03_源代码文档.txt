@@ -1,0 +1,5073 @@
+// ===========================================================
+// AI小说助手软件V1.0 源代码
+// 总代码行数：4829行
+// 开发语言：TypeScript / Vue
+// ===========================================================
+
+// ===========================================================
+// 文件路径：electron/main.ts
+// 代码行数：130
+// ===========================================================
+
+import { app, BrowserWindow, ipcMain, dialog } from 'electron'
+import path from 'path'
+import fs from 'fs/promises'
+
+let mainWindow: BrowserWindow | null = null
+
+const isDev = !app.isPackaged
+
+function getNovelsDir(): string {
+  return path.join(app.getPath('userData'), 'novels')
+}
+
+async function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1280,
+    height: 800,
+    minWidth: 960,
+    minHeight: 600,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  })
+
+  if (isDev) {
+    // Try multiple ports in case Vite uses a different one
+    const tryLoad = async (port: number): Promise<boolean> => {
+      try {
+        await mainWindow!.loadURL(`http://localhost:${port}`)
+        return true
+      } catch { return false }
+    }
+    const ports = [5173, 5174, 5175]
+    for (const port of ports) {
+      if (await tryLoad(port)) break
+    }
+    mainWindow.webContents.openDevTools()
+  } else {
+    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
+  }
+
+  mainWindow.on('closed', () => {
+    mainWindow = null
+  })
+}
+
+// IPC handlers for file operations
+function registerIPC() {
+  // Get novels directory
+  ipcMain.handle('getNovelsDir', () => getNovelsDir())
+
+  // Ensure directory exists
+  ipcMain.handle('ensureDirectory', async (_event, dirPath: string) => {
+    await fs.mkdir(dirPath, { recursive: true })
+  })
+
+  // Read file
+  ipcMain.handle('readFile', async (_event, filePath: string) => {
+    return await fs.readFile(filePath, 'utf-8')
+  })
+
+  // Write file
+  ipcMain.handle('writeFile', async (_event, filePath: string, content: string) => {
+    const dir = path.dirname(filePath)
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(filePath, content, 'utf-8')
+  })
+
+  // Delete file
+  ipcMain.handle('deleteFile', async (_event, filePath: string) => {
+    await fs.unlink(filePath)
+  })
+
+  // List files in directory
+  ipcMain.handle('listFiles', async (_event, dirPath: string) => {
+    try {
+      const entries = await fs.readdir(dirPath, { withFileTypes: true })
+      return entries.map(e => ({ name: e.name, isDirectory: e.isDirectory() }))
+    } catch {
+      return []
+    }
+  })
+
+  // Delete directory recursively
+  ipcMain.handle('deleteDirectory', async (_event, dirPath: string) => {
+    await fs.rm(dirPath, { recursive: true, force: true })
+  })
+
+  // Check if path exists
+  ipcMain.handle('pathExists', async (_event, filePath: string) => {
+    try {
+      await fs.access(filePath)
+      return true
+    } catch {
+      return false
+    }
+  })
+
+  // Path join
+  ipcMain.handle('pathJoin', async (_event, ...segments: string[]) => {
+    return path.join(...segments)
+  })
+
+  // Open directory dialog
+  ipcMain.handle('selectDirectory', async () => {
+    if (!mainWindow) return null
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory', 'createDirectory']
+    })
+    return result.canceled ? null : result.filePaths[0]
+  })
+}
+
+app.whenReady().then(() => {
+  registerIPC()
+  createWindow()
+})
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    app.quit()
+  }
+})
+
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow()
+  }
+})
+
+
+// ===========================================================
+// 文件路径：electron/preload.ts
+// 代码行数：29
+// ===========================================================
+
+import { contextBridge, ipcRenderer } from 'electron'
+
+export interface ElectronAPI {
+  getNovelsDir(): Promise<string>
+  ensureDirectory(path: string): Promise<void>
+  readFile(path: string): Promise<string>
+  writeFile(path: string, content: string): Promise<void>
+  deleteFile(path: string): Promise<void>
+  listFiles(dirPath: string): Promise<{ name: string; isDirectory: boolean }[]>
+  deleteDirectory(path: string): Promise<void>
+  pathExists(path: string): Promise<boolean>
+  pathJoin(...segments: string[]): Promise<string>
+  selectDirectory(): Promise<string | null>
+}
+
+const electronAPI: ElectronAPI = {
+  getNovelsDir: () => ipcRenderer.invoke('getNovelsDir'),
+  ensureDirectory: (path) => ipcRenderer.invoke('ensureDirectory', path),
+  readFile: (path) => ipcRenderer.invoke('readFile', path),
+  writeFile: (path, content) => ipcRenderer.invoke('writeFile', path, content),
+  deleteFile: (path) => ipcRenderer.invoke('deleteFile', path),
+  listFiles: (dirPath) => ipcRenderer.invoke('listFiles', dirPath),
+  deleteDirectory: (path) => ipcRenderer.invoke('deleteDirectory', path),
+  pathExists: (path) => ipcRenderer.invoke('pathExists', path),
+  pathJoin: (...segments) => ipcRenderer.invoke('pathJoin', ...segments),
+  selectDirectory: () => ipcRenderer.invoke('selectDirectory')
+}
+
+contextBridge.exposeInMainWorld('electronAPI', electronAPI)
+
+
+// ===========================================================
+// 文件路径：src/main.ts
+// 代码行数：9
+// ===========================================================
+
+import { createApp } from 'vue'
+import { createPinia } from 'pinia'
+import App from './App.vue'
+import router from './router'
+
+const app = createApp(App)
+app.use(createPinia())
+app.use(router)
+app.mount('#app')
+
+
+// ===========================================================
+// 文件路径：src/env.d.ts
+// 代码行数：9
+// ===========================================================
+
+import type { ElectronAPI } from '../electron/preload'
+
+declare global {
+  interface Window {
+    electronAPI: ElectronAPI
+  }
+}
+
+export {}
+
+
+// ===========================================================
+// 文件路径：src/App.vue
+// 代码行数：38
+// ===========================================================
+
+<template>
+  <n-config-provider :theme="appStore.isDark ? darkTheme : null" :theme-overrides="themeOverrides">
+    <n-message-provider>
+      <n-notification-provider>
+        <n-dialog-provider>
+          <n-layout has-sider style="height: 100vh">
+            <app-sidebar />
+            <n-layout-content content-style="padding: 0; overflow: hidden;">
+              <router-view />
+            </n-layout-content>
+          </n-layout>
+        </n-dialog-provider>
+      </n-notification-provider>
+    </n-message-provider>
+  </n-config-provider>
+</template>
+
+<script setup lang="ts">
+import { onMounted } from 'vue'
+import { darkTheme } from 'naive-ui'
+import { useAppStore } from '@/stores/app'
+import { useAIStore } from '@/stores/ai'
+import AppSidebar from '@/components/AppSidebar.vue'
+
+const appStore = useAppStore()
+const aiStore = useAIStore()
+
+const themeOverrides = {
+  common: {
+    fontFamily: '"Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif'
+  }
+}
+
+onMounted(async () => {
+  await appStore.init()
+  await aiStore.load()
+})
+</script>
+
+
+// ===========================================================
+// 文件路径：src/router/index.ts
+// 代码行数：64
+// ===========================================================
+
+import { createRouter, createWebHashHistory } from 'vue-router'
+
+const router = createRouter({
+  history: createWebHashHistory(),
+  routes: [
+    {
+      path: '/',
+      name: 'home',
+      component: () => import('@/views/ProjectListView.vue')
+    },
+    {
+      path: '/settings',
+      name: 'settings',
+      component: () => import('@/views/SettingsView.vue')
+    },
+    {
+      path: '/project/:id',
+      component: () => import('@/views/ProjectDetailView.vue'),
+      children: [
+        {
+          path: '',
+          redirect: (to) => `/project/${to.params.id}/outline`
+        },
+        {
+          path: 'outline',
+          name: 'outline',
+          component: () => import('@/views/OutlineView.vue')
+        },
+        {
+          path: 'volumes',
+          name: 'volumes',
+          component: () => import('@/views/VolumesView.vue')
+        },
+        {
+          path: 'chapters/:volumeId',
+          name: 'chapters',
+          component: () => import('@/views/ChaptersView.vue')
+        },
+        {
+          path: 'chapters/:volumeId/:chapterId',
+          name: 'chapter-editor',
+          component: () => import('@/views/ChapterEditorView.vue')
+        },
+        {
+          path: 'characters',
+          name: 'characters',
+          component: () => import('@/views/CharactersView.vue')
+        },
+        {
+          path: 'characters/:charId',
+          name: 'character-detail',
+          component: () => import('@/views/CharacterDetailView.vue')
+        },
+        {
+          path: 'graph',
+          name: 'graph',
+          component: () => import('@/views/CharacterGraphView.vue')
+        }
+      ]
+    }
+  ]
+})
+
+export default router
+
+
+// ===========================================================
+// 文件路径：src/types/ai.ts
+// 代码行数：35
+// ===========================================================
+
+export interface AIProvider {
+  id: string
+  name: string
+  baseUrl: string
+  apiKey: string
+  model: string
+  temperature: number
+  maxTokens: number
+  topP: number
+  contextSize: number
+  isActive: boolean
+}
+
+export interface AIMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
+
+export interface AIStreamCallbacks {
+  onToken?: (token: string) => void
+  onComplete?: (fullText: string) => void
+  onError?: (error: Error) => void
+}
+
+export const DEFAULT_PROVIDER: Omit<AIProvider, 'id'> = {
+  name: '',
+  baseUrl: 'https://api.openai.com',
+  apiKey: '',
+  model: 'gpt-4',
+  temperature: 0.8,
+  maxTokens: 4096,
+  topP: 1.0,
+  contextSize: 128000,
+  isActive: false
+}
+
+
+// ===========================================================
+// 文件路径：src/types/project.ts
+// 代码行数：25
+// ===========================================================
+
+export interface NovelProject {
+  name: string
+  type: string
+  style: string
+  tags: string[]
+  targetWordCount: number
+  targetPlatform: string
+  perspective: 'first' | 'third'
+  audience: 'male' | 'female'
+  pacing: string
+  description: string
+  createdAt: string
+  updatedAt: string
+}
+
+export const NOVEL_TYPES = [
+  '东方玄幻', '西方奇幻', '都市', '科幻', '武侠', '仙侠',
+  '历史', '军事', '游戏', '悬疑', '恐怖', '言情', '其他'
+] as const
+
+export const NOVEL_STYLES = ['爽文', '慢热', '轻松', '沉重', '幽默', '热血', '暗黑'] as const
+
+export const TARGET_PLATFORMS = ['起点', '番茄', '飞卢', '晋江', '纵横', '其他'] as const
+
+export const PACING_OPTIONS = ['快节奏', '中等节奏', '慢节奏', '先慢后快'] as const
+
+
+// ===========================================================
+// 文件路径：src/types/chapter.ts
+// 代码行数：35
+// ===========================================================
+
+export interface Volume {
+  id: string
+  name: string
+  description: string
+  order: number
+  targetWordCount: number
+  createdAt: string
+}
+
+export type ChapterStatus = 'outline' | 'generated' | 'polished' | 'de_ai' | 'final'
+
+export const CHAPTER_STATUS_LABELS: Record<ChapterStatus, string> = {
+  outline: '仅有细纲',
+  generated: '已生成正文',
+  polished: '已润色',
+  de_ai: '已去AI味',
+  final: '终稿'
+}
+
+export interface ChapterMeta {
+  id: string
+  volumeId: string
+  filename: string
+  title: string
+  outline: string
+  wordCount: number
+  status: ChapterStatus
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ChapterContent {
+  meta: ChapterMeta
+  content: string
+}
+
+
+// ===========================================================
+// 文件路径：src/types/character.ts
+// 代码行数：61
+// ===========================================================
+
+export interface Character {
+  id: string
+  name: string
+  gender: string
+  age: number
+  personality: string
+  background: string
+  skills: string[]
+  items: string[]
+  speechStyle: string
+  goal: string
+  secret: string
+  role: 'protagonist' | 'antagonist' | 'supporting' | 'minor'
+  avatar?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type RelationshipType =
+  | 'friend' | 'enemy' | 'lover' | 'master' | 'subordinate'
+  | 'kin' | 'rival' | 'ally' | 'betrayal'
+
+export const RELATIONSHIP_LABELS: Record<RelationshipType, string> = {
+  friend: '朋友',
+  enemy: '敌人',
+  lover: '恋人',
+  master: '师徒',
+  subordinate: '上下级',
+  kin: '血缘',
+  rival: '竞争',
+  ally: '同盟',
+  betrayal: '背叛'
+}
+
+export const RELATIONSHIP_COLORS: Record<RelationshipType, string> = {
+  friend: '#52c41a',
+  enemy: '#ff4d4f',
+  lover: '#eb2f96',
+  master: '#1890ff',
+  subordinate: '#722ed1',
+  kin: '#fa8c16',
+  rival: '#faad14',
+  ally: '#13c2c2',
+  betrayal: '#f5222d'
+}
+
+export interface Relationship {
+  id: string
+  source: string
+  target: string
+  type: RelationshipType
+  description: string
+  strength: number
+}
+
+export const CHARACTER_ROLES = [
+  { value: 'protagonist', label: '主角' },
+  { value: 'antagonist', label: '反派' },
+  { value: 'supporting', label: '配角' },
+  { value: 'minor', label: '龙套' }
+] as const
+
+
+// ===========================================================
+// 文件路径：src/api/ai.ts
+// 代码行数：116
+// ===========================================================
+
+import type { AIProvider, AIMessage, AIStreamCallbacks } from '@/types/ai'
+
+/**
+ * 调用 OpenAI 兼容接口，支持流式输出
+ */
+export async function callAI(
+  config: AIProvider,
+  messages: AIMessage[],
+  options?: { signal?: AbortSignal },
+  callbacks?: AIStreamCallbacks
+): Promise<string> {
+  const url = config.baseUrl.replace(/\/+$/, '') + '/v1/chat/completions'
+
+  const body = {
+    model: config.model,
+    messages,
+    temperature: config.temperature,
+    max_tokens: config.maxTokens,
+    top_p: config.topP,
+    stream: true
+  }
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.apiKey}`
+      },
+      body: JSON.stringify(body),
+      signal: options?.signal
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      throw new Error(`API 请求失败: ${response.status} ${errorText}`)
+    }
+
+    if (!response.body) {
+      throw new Error('响应体为空')
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let fullText = ''
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed || trimmed === 'data: [DONE]') continue
+        if (!trimmed.startsWith('data: ')) continue
+
+        try {
+          const json = JSON.parse(trimmed.slice(6))
+          const content = json.choices?.[0]?.delta?.content
+          if (content) {
+            fullText += content
+            callbacks?.onToken?.(content)
+          }
+        } catch {
+          // 跳过无法解析的行
+        }
+      }
+    }
+
+    callbacks?.onComplete?.(fullText)
+    return fullText
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error))
+    callbacks?.onError?.(err)
+    throw err
+  }
+}
+
+/**
+ * 非流式调用（用于测试连接等简单场景）
+ */
+export async function callAINonStream(
+  config: AIProvider,
+  messages: AIMessage[]
+): Promise<string> {
+  const url = config.baseUrl.replace(/\/+$/, '') + '/v1/chat/completions'
+
+  const body = {
+    model: config.model,
+    messages,
+    temperature: config.temperature,
+    max_tokens: Math.min(config.maxTokens, 100),
+    stream: false
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.apiKey}`
+    },
+    body: JSON.stringify(body)
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    throw new Error(`API 请求失败: ${response.status} ${errorText}`)
+  }
+
+  const data = await response.json()
+  return data.choices?.[0]?.message?.content || ''
+}
+
+
+// ===========================================================
+// 文件路径：src/utils/wordCount.ts
+// 代码行数：12
+// ===========================================================
+
+/**
+ * 统计中文字数
+ * CJK 字符算 1 字，ASCII 单词按空格分隔算 1 词
+ */
+export function countWords(text: string): number {
+  if (!text) return 0
+  const cjkRegex = /[一-鿿㐀-䶿豈-﫿]/g
+  const cjkCount = (text.match(cjkRegex) || []).length
+  const asciiPart = text.replace(cjkRegex, ' ')
+  const asciiWords = asciiPart.split(/\s+/).filter(w => w.length > 0).length
+  return cjkCount + asciiWords
+}
+
+
+// ===========================================================
+// 文件路径：src/stores/app.ts
+// 代码行数：29
+// ===========================================================
+
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+import localforage from 'localforage'
+
+export const useAppStore = defineStore('app', () => {
+  const isDark = ref(false)
+  const novelsDir = ref('')
+  const isLoading = ref(false)
+
+  async function init() {
+    // Load theme preference
+    const savedTheme = await localforage.getItem<boolean>('dark-theme')
+    if (savedTheme !== null) {
+      isDark.value = savedTheme
+    }
+
+    // Load novels directory
+    if (window.electronAPI) {
+      novelsDir.value = await window.electronAPI.getNovelsDir()
+    }
+  }
+
+  async function toggleTheme() {
+    isDark.value = !isDark.value
+    await localforage.setItem('dark-theme', isDark.value)
+  }
+
+  return { isDark, novelsDir, isLoading, init, toggleTheme }
+})
+
+
+// ===========================================================
+// 文件路径：src/stores/ai.ts
+// 代码行数：67
+// ===========================================================
+
+import { defineStore } from 'pinia'
+import { ref, computed } from 'vue'
+import localforage from 'localforage'
+import { nanoid } from 'nanoid'
+import type { AIProvider } from '@/types/ai'
+
+const STORAGE_KEY = 'ai-providers'
+
+export const useAIStore = defineStore('ai', () => {
+  const providers = ref<AIProvider[]>([])
+
+  const activeProvider = computed(() =>
+    providers.value.find(p => p.isActive) || null
+  )
+
+  async function load() {
+    const saved = await localforage.getItem<AIProvider[]>(STORAGE_KEY)
+    if (saved) {
+      providers.value = saved
+    }
+  }
+
+  async function save() {
+    // JSON 序列化去除 Vue reactive proxy，避免 IndexedDB DataCloneError
+    await localforage.setItem(STORAGE_KEY, JSON.parse(JSON.stringify(providers.value)))
+  }
+
+  async function addProvider(provider: Omit<AIProvider, 'id'>) {
+    const newProvider: AIProvider = {
+      ...provider,
+      id: nanoid()
+    }
+    providers.value.push(newProvider)
+    await save()
+    return newProvider
+  }
+
+  async function updateProvider(id: string, data: Partial<AIProvider>) {
+    const index = providers.value.findIndex(p => p.id === id)
+    if (index !== -1) {
+      providers.value[index] = { ...providers.value[index], ...data }
+      await save()
+    }
+  }
+
+  async function removeProvider(id: string) {
+    providers.value = providers.value.filter(p => p.id !== id)
+    await save()
+  }
+
+  async function setActiveProvider(id: string) {
+    providers.value.forEach(p => {
+      p.isActive = p.id === id
+    })
+    await save()
+  }
+
+  return {
+    providers,
+    activeProvider,
+    load,
+    addProvider,
+    updateProvider,
+    removeProvider,
+    setActiveProvider
+  }
+})
+
+
+// ===========================================================
+// 文件路径：src/stores/project.ts
+// 代码行数：129
+// ===========================================================
+
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+import type { NovelProject } from '@/types/project'
+import { BUILTIN_TEMPLATES } from '@/utils/promptTemplates'
+
+export const useProjectStore = defineStore('project', () => {
+  const projects = ref<NovelProject[]>([])
+  const currentProject = ref<NovelProject | null>(null)
+  const currentProjectName = ref('')
+
+  async function loadProjectList() {
+    if (!window.electronAPI) return
+    const novelsDir = await window.electronAPI.getNovelsDir()
+    await window.electronAPI.ensureDirectory(novelsDir)
+    const entries = await window.electronAPI.listFiles(novelsDir)
+    const dirs = entries.filter((e: { name: string; isDirectory: boolean }) => e.isDirectory)
+
+    const loaded: NovelProject[] = []
+    for (const dir of dirs) {
+      try {
+        const jsonPath = await window.electronAPI.pathJoin(novelsDir, dir.name, 'project.json')
+        const content = await window.electronAPI.readFile(jsonPath)
+        const project = JSON.parse(content) as NovelProject
+        loaded.push(project)
+      } catch {
+        // 跳过无效项目
+      }
+    }
+    projects.value = loaded
+  }
+
+  async function createProject(data: Omit<NovelProject, 'createdAt' | 'updatedAt'>) {
+    if (!window.electronAPI) return
+    const novelsDir = await window.electronAPI.getNovelsDir()
+    const projectDir = await window.electronAPI.pathJoin(novelsDir, data.name)
+
+    const now = new Date().toISOString()
+    const project: NovelProject = {
+      ...data,
+      createdAt: now,
+      updatedAt: now
+    }
+
+    // 创建目录结构
+    const dirs = ['', 'outline', 'volumes', 'characters', 'graph', 'memory', 'settings']
+    for (const dir of dirs) {
+      await window.electronAPI.ensureDirectory(
+        await window.electronAPI.pathJoin(projectDir, dir)
+      )
+    }
+
+    // 写入项目文件
+    await window.electronAPI.writeFile(
+      await window.electronAPI.pathJoin(projectDir, 'project.json'),
+      JSON.stringify(project, null, 2)
+    )
+
+    // 初始化大纲文件
+    for (const name of ['总纲', '世界观', '支线']) {
+      await window.electronAPI.writeFile(
+        await window.electronAPI.pathJoin(projectDir, 'outline', `${name}.md`),
+        `# ${name}\n\n`
+      )
+    }
+
+    // 初始化人物关系
+    await window.electronAPI.writeFile(
+      await window.electronAPI.pathJoin(projectDir, 'graph', 'relations.json'),
+      JSON.stringify({ nodes: [], edges: [] }, null, 2)
+    )
+
+    // 初始化记忆文件
+    await window.electronAPI.writeFile(
+      await window.electronAPI.pathJoin(projectDir, 'memory', 'timeline.json'),
+      '[]'
+    )
+    await window.electronAPI.writeFile(
+      await window.electronAPI.pathJoin(projectDir, 'memory', 'summaries.json'),
+      '[]'
+    )
+
+    // 初始化 Prompt 模板
+    await window.electronAPI.writeFile(
+      await window.electronAPI.pathJoin(projectDir, 'settings', 'prompt.json'),
+      JSON.stringify(BUILTIN_TEMPLATES, null, 2)
+    )
+
+    projects.value.push(project)
+    return project
+  }
+
+  async function openProject(name: string) {
+    if (!window.electronAPI) return
+    const novelsDir = await window.electronAPI.getNovelsDir()
+    const jsonPath = await window.electronAPI.pathJoin(novelsDir, name, 'project.json')
+    const content = await window.electronAPI.readFile(jsonPath)
+    currentProject.value = JSON.parse(content) as NovelProject
+    currentProjectName.value = name
+  }
+
+  async function deleteProject(name: string) {
+    if (!window.electronAPI) return
+    const novelsDir = await window.electronAPI.getNovelsDir()
+    const projectDir = await window.electronAPI.pathJoin(novelsDir, name)
+    await window.electronAPI.deleteDirectory(projectDir)
+    projects.value = projects.value.filter(p => p.name !== name)
+    if (currentProjectName.value === name) {
+      currentProject.value = null
+      currentProjectName.value = ''
+    }
+  }
+
+  async function getProjectDir(name?: string) {
+    if (!window.electronAPI) return ''
+    const novelsDir = await window.electronAPI.getNovelsDir()
+    return window.electronAPI.pathJoin(novelsDir, name || currentProjectName.value)
+  }
+
+  return {
+    projects,
+    currentProject,
+    currentProjectName,
+    loadProjectList,
+    createProject,
+    openProject,
+    deleteProject,
+    getProjectDir
+  }
+})
+
+
+// ===========================================================
+// 文件路径：src/stores/outline.ts
+// 代码行数：118
+// ===========================================================
+
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+import { useProjectStore } from '@/stores/project'
+import { useAIStore } from '@/stores/ai'
+import { callAI } from '@/api/ai'
+import { renderPrompt, BUILTIN_TEMPLATES } from '@/utils/promptTemplates'
+
+export type OutlineType = '总纲' | '世界观' | '支线'
+
+export const useOutlineStore = defineStore('outline', () => {
+  const contents = ref<Record<OutlineType, string>>({
+    '总纲': '',
+    '世界观': '',
+    '支线': ''
+  })
+  const loading = ref(false)
+
+  async function loadOutline(type: OutlineType) {
+    const projectStore = useProjectStore()
+    if (!window.electronAPI || !projectStore.currentProjectName) return
+    const dir = await projectStore.getProjectDir()
+    const filePath = await window.electronAPI.pathJoin(dir, 'outline', `${type}.md`)
+    try {
+      contents.value[type] = await window.electronAPI.readFile(filePath)
+    } catch {
+      contents.value[type] = `# ${type}\n\n`
+    }
+  }
+
+  async function saveOutline(type: OutlineType, content: string) {
+    const projectStore = useProjectStore()
+    if (!window.electronAPI || !projectStore.currentProjectName) return
+    const dir = await projectStore.getProjectDir()
+    const filePath = await window.electronAPI.pathJoin(dir, 'outline', `${type}.md`)
+    await window.electronAPI.writeFile(filePath, content)
+    contents.value[type] = content
+  }
+
+  async function loadPromptTemplates(): Promise<Record<string, string>> {
+    const projectStore = useProjectStore()
+    if (!window.electronAPI || !projectStore.currentProjectName) return BUILTIN_TEMPLATES
+    const dir = await projectStore.getProjectDir()
+    const filePath = await window.electronAPI.pathJoin(dir, 'settings', 'prompt.json')
+    try {
+      const content = await window.electronAPI.readFile(filePath)
+      return { ...BUILTIN_TEMPLATES, ...JSON.parse(content) }
+    } catch {
+      return BUILTIN_TEMPLATES
+    }
+  }
+
+  async function polishOutline(
+    type: OutlineType,
+    onToken?: (token: string) => void
+  ): Promise<string> {
+    const aiStore = useAIStore()
+    if (!aiStore.activeProvider) throw new Error('请先配置 AI Provider')
+
+    loading.value = true
+    try {
+      const templates = await loadPromptTemplates()
+      const prompt = renderPrompt(templates.OUTLINE_POLISH, {
+        outline: contents.value[type]
+      })
+
+      const result = await callAI(
+        aiStore.activeProvider,
+        [
+          { role: 'system', content: '你是一名拥有20年以上经验的中文网络小说总编剧。' },
+          { role: 'user', content: prompt }
+        ],
+        undefined,
+        { onToken }
+      )
+      return result
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function expandOutline(
+    type: OutlineType,
+    onToken?: (token: string) => void
+  ): Promise<string> {
+    const aiStore = useAIStore()
+    if (!aiStore.activeProvider) throw new Error('请先配置 AI Provider')
+
+    loading.value = true
+    try {
+      const templates = await loadPromptTemplates()
+      const prompt = renderPrompt(templates.OUTLINE_EXPAND, {
+        outline: contents.value[type]
+      })
+
+      const result = await callAI(
+        aiStore.activeProvider,
+        [
+          { role: 'system', content: '你是一名顶级中文网络小说作者。' },
+          { role: 'user', content: prompt }
+        ],
+        undefined,
+        { onToken }
+      )
+      return result
+    } finally {
+      loading.value = false
+    }
+  }
+
+  return {
+    contents,
+    loading,
+    loadOutline,
+    saveOutline,
+    polishOutline,
+    expandOutline
+  }
+})
+
+
+// ===========================================================
+// 文件路径：src/stores/volume.ts
+// 代码行数：72
+// ===========================================================
+
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+import { nanoid } from 'nanoid'
+import type { Volume } from '@/types/chapter'
+import { useProjectStore } from '@/stores/project'
+
+export const useVolumeStore = defineStore('volume', () => {
+  const volumes = ref<Volume[]>([])
+  const loading = ref(false)
+
+  async function loadVolumes() {
+    const projectStore = useProjectStore()
+    if (!window.electronAPI || !projectStore.currentProjectName) return
+    const dir = await projectStore.getProjectDir()
+    const volDir = await window.electronAPI.pathJoin(dir, 'volumes')
+    await window.electronAPI.ensureDirectory(volDir)
+    const entries = await window.electronAPI.listFiles(volDir)
+    const dirs = entries.filter((e: { name: string; isDirectory: boolean }) => e.isDirectory)
+
+    const loaded: Volume[] = []
+    for (const d of dirs) {
+      try {
+        const metaPath = await window.electronAPI.pathJoin(volDir, d.name, 'volume.json')
+        const content = await window.electronAPI.readFile(metaPath)
+        loaded.push(JSON.parse(content))
+      } catch { /* skip */ }
+    }
+    volumes.value = loaded.sort((a, b) => a.order - b.order)
+  }
+
+  async function createVolume(data: { name: string; description: string; targetWordCount: number }) {
+    const projectStore = useProjectStore()
+    if (!window.electronAPI || !projectStore.currentProjectName) return
+
+    const volume: Volume = {
+      id: nanoid(),
+      name: data.name,
+      description: data.description,
+      order: volumes.value.length + 1,
+      targetWordCount: data.targetWordCount,
+      createdAt: new Date().toISOString()
+    }
+
+    const dir = await projectStore.getProjectDir()
+    const volDir = await window.electronAPI.pathJoin(dir, 'volumes', data.name)
+    await window.electronAPI.ensureDirectory(volDir)
+    await window.electronAPI.writeFile(
+      await window.electronAPI.pathJoin(volDir, 'volume.json'),
+      JSON.stringify(volume, null, 2)
+    )
+
+    volumes.value.push(volume)
+    return volume
+  }
+
+  async function deleteVolume(volume: Volume) {
+    const projectStore = useProjectStore()
+    if (!window.electronAPI || !projectStore.currentProjectName) return
+    const dir = await projectStore.getProjectDir()
+    const volDir = await window.electronAPI.pathJoin(dir, 'volumes', volume.name)
+    await window.electronAPI.deleteDirectory(volDir)
+    volumes.value = volumes.value.filter(v => v.id !== volume.id)
+  }
+
+  return {
+    volumes,
+    loading,
+    loadVolumes,
+    createVolume,
+    deleteVolume
+  }
+})
+
+
+// ===========================================================
+// 文件路径：src/stores/chapter.ts
+// 代码行数：472
+// ===========================================================
+
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+import { nanoid } from 'nanoid'
+import type { ChapterMeta, ChapterStatus } from '@/types/chapter'
+import { useProjectStore } from '@/stores/project'
+import { useAIStore } from '@/stores/ai'
+import { useCharacterStore } from '@/stores/character'
+import { useVolumeStore } from '@/stores/volume'
+import { callAI } from '@/api/ai'
+import { renderPrompt, BUILTIN_TEMPLATES } from '@/utils/promptTemplates'
+import { countWords } from '@/utils/wordCount'
+
+export const useChapterStore = defineStore('chapter', () => {
+  const chapters = ref<ChapterMeta[]>([])
+  const currentContent = ref('')
+  const loading = ref(false)
+
+  function getVolumeDirName(volumeId: string): string | null {
+    const projectStore = useProjectStore()
+    // Find volume by id from the store
+    const { volumes } = useVolumeStore()
+    const vol = volumes.find(v => v.id === volumeId)
+    return vol?.name || null
+  }
+
+  async function loadChapters(volumeId: string) {
+    const projectStore = useProjectStore()
+    const { volumes } = useVolumeStore()
+    if (!window.electronAPI || !projectStore.currentProjectName) return
+
+    const vol = volumes.find(v => v.id === volumeId)
+    if (!vol) return
+
+    const dir = await projectStore.getProjectDir()
+    const volDir = await window.electronAPI.pathJoin(dir, 'volumes', vol.name)
+    const entries = await window.electronAPI.listFiles(volDir)
+    const mdFiles = entries
+      .filter((e: { name: string; isDirectory: boolean }) => !e.isDirectory && e.name.endsWith('.md'))
+      .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name))
+
+    const loaded: ChapterMeta[] = []
+    for (const file of mdFiles) {
+      try {
+        const content = await window.electronAPI.readFile(
+          await window.electronAPI.pathJoin(volDir, file.name)
+        )
+        // Parse metadata from first line comment
+        const metaMatch = content.match(/^<!--meta:(.*?)-->/s)
+        let meta: Partial<ChapterMeta> = {}
+        if (metaMatch) {
+          try { meta = JSON.parse(metaMatch[1]) } catch { /* ignore */ }
+        }
+
+        const titleMatch = content.match(/^<!--meta:.*?-->\s*#\s*(.+)$/ms)
+        const title = titleMatch?.[1]?.trim() || file.name.replace('.md', '')
+
+        loaded.push({
+          id: meta.id || nanoid(),
+          volumeId,
+          filename: file.name,
+          title: meta.title || title,
+          outline: meta.outline || '',
+          wordCount: countWords(content),
+          status: meta.status || 'outline',
+          createdAt: meta.createdAt || new Date().toISOString(),
+          updatedAt: meta.updatedAt || new Date().toISOString()
+        })
+      } catch { /* skip */ }
+    }
+    chapters.value = loaded
+  }
+
+  async function loadChapterContent(volumeId: string, filename: string) {
+    const projectStore = useProjectStore()
+    const { volumes } = useVolumeStore()
+    if (!window.electronAPI) return ''
+    const vol = volumes.find(v => v.id === volumeId)
+    if (!vol) return ''
+
+    const dir = await projectStore.getProjectDir()
+    const filePath = await window.electronAPI.pathJoin(dir, 'volumes', vol.name, filename)
+    try {
+      const raw = await window.electronAPI.readFile(filePath)
+      // Strip meta comment
+      currentContent.value = raw.replace(/^<!--meta:.*?-->\s*/s, '')
+      return currentContent.value
+    } catch {
+      currentContent.value = ''
+      return ''
+    }
+  }
+
+  async function saveChapterContent(volumeId: string, chapter: ChapterMeta) {
+    const projectStore = useProjectStore()
+    const { volumes } = useVolumeStore()
+    if (!window.electronAPI) return
+    const vol = volumes.find(v => v.id === volumeId)
+    if (!vol) return
+
+    const dir = await projectStore.getProjectDir()
+    const filePath = await window.electronAPI.pathJoin(dir, 'volumes', vol.name, chapter.filename)
+
+    const meta = {
+      id: chapter.id,
+      title: chapter.title,
+      outline: chapter.outline,
+      status: chapter.status,
+      createdAt: chapter.createdAt,
+      updatedAt: new Date().toISOString()
+    }
+
+    const content = `<!--meta:${JSON.stringify(meta)}-->\n# ${chapter.title}\n\n${currentContent.value}`
+    await window.electronAPI.writeFile(filePath, content)
+
+    // Update chapter word count
+    chapter.wordCount = countWords(currentContent.value)
+    chapter.updatedAt = meta.updatedAt
+  }
+
+  async function createChapter(volumeId: string, title: string) {
+    const projectStore = useProjectStore()
+    const { volumes } = useVolumeStore()
+    if (!window.electronAPI) return null
+    const vol = volumes.find(v => v.id === volumeId)
+    if (!vol) return null
+
+    const chapterNum = chapters.value.length + 1
+    const filename = `chapter_${String(chapterNum).padStart(3, '0')}.md`
+    const now = new Date().toISOString()
+
+    const chapter: ChapterMeta = {
+      id: nanoid(),
+      volumeId,
+      filename,
+      title,
+      outline: '',
+      wordCount: 0,
+      status: 'outline',
+      createdAt: now,
+      updatedAt: now
+    }
+
+    const dir = await projectStore.getProjectDir()
+    const filePath = await window.electronAPI.pathJoin(dir, 'volumes', vol.name, filename)
+    const metaStr = JSON.stringify({
+      id: chapter.id, title: chapter.title, outline: '',
+      status: 'outline', createdAt: now, updatedAt: now
+    })
+    await window.electronAPI.writeFile(
+      filePath,
+      `<!--meta:${metaStr}-->\n# ${title}\n\n`
+    )
+
+    chapters.value.push(chapter)
+    return chapter
+  }
+
+  async function loadPromptTemplates(): Promise<Record<string, string>> {
+    const projectStore = useProjectStore()
+    if (!window.electronAPI || !projectStore.currentProjectName) return BUILTIN_TEMPLATES
+    const dir = await projectStore.getProjectDir()
+    try {
+      const content = await window.electronAPI.readFile(
+        await window.electronAPI.pathJoin(dir, 'settings', 'prompt.json')
+      )
+      return { ...BUILTIN_TEMPLATES, ...JSON.parse(content) }
+    } catch {
+      return BUILTIN_TEMPLATES
+    }
+  }
+
+  async function buildContext(): Promise<{ characters: string; worldview: string; prevSummary: string }> {
+    const projectStore = useProjectStore()
+    const charStore = useCharacterStore()
+    if (!window.electronAPI || !projectStore.currentProjectName) {
+      return { characters: '', worldview: '', prevSummary: '' }
+    }
+
+    // Load characters
+    await charStore.loadCharacters()
+    const charBlock = charStore.characters.map(c =>
+      `【${c.name}】性别:${c.gender} 年龄:${c.age}\n性格:${c.personality}\n背景:${c.background}\n说话风格:${c.speechStyle}\n目标:${c.goal}\n秘密:${c.secret}`
+    ).join('\n\n')
+
+    // Load worldview
+    const dir = await projectStore.getProjectDir()
+    let worldview = ''
+    try {
+      worldview = await window.electronAPI.readFile(
+        await window.electronAPI.pathJoin(dir, 'outline', '世界观.md')
+      )
+    } catch { /* not found */ }
+
+    // Load previous summary
+    let prevSummary = ''
+    try {
+      const content = await window.electronAPI.readFile(
+        await window.electronAPI.pathJoin(dir, 'memory', 'summaries.json')
+      )
+      const summaries = JSON.parse(content)
+      if (Array.isArray(summaries) && summaries.length > 0) {
+        prevSummary = summaries[summaries.length - 1]?.content || ''
+      }
+    } catch { /* not found */ }
+
+    return { characters: charBlock, worldview, prevSummary }
+  }
+
+  async function generateOutline(
+    volumeOutline: string,
+    onToken?: (token: string) => void
+  ): Promise<string> {
+    const aiStore = useAIStore()
+    if (!aiStore.activeProvider) throw new Error('请先配置 AI Provider')
+    loading.value = true
+    try {
+      const templates = await loadPromptTemplates()
+      const ctx = await buildContext()
+      const prompt = renderPrompt(templates.CHAPTER_OUTLINE_GEN, {
+        volumeOutline,
+        prevSummary: ctx.prevSummary,
+        characters: ctx.characters
+      })
+      return await callAI(
+        aiStore.activeProvider,
+        [
+          { role: 'system', content: '你是一名顶级中文网络小说作者。' },
+          { role: 'user', content: prompt }
+        ],
+        undefined,
+        { onToken }
+      )
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function generateContent(
+    chapterOutline: string,
+    onToken?: (token: string) => void
+  ): Promise<string> {
+    const aiStore = useAIStore()
+    if (!aiStore.activeProvider) throw new Error('请先配置 AI Provider')
+    loading.value = true
+    try {
+      const templates = await loadPromptTemplates()
+      const ctx = await buildContext()
+      const prompt = renderPrompt(templates.CHAPTER_CONTENT_GEN, {
+        characters: ctx.characters,
+        worldview: ctx.worldview,
+        prevSummary: ctx.prevSummary,
+        chapterOutline
+      })
+      return await callAI(
+        aiStore.activeProvider,
+        [
+          { role: 'system', content: '你是一名顶级中文网络小说作者。' },
+          { role: 'user', content: prompt }
+        ],
+        undefined,
+        { onToken }
+      )
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function polishContent(
+    content: string,
+    onToken?: (token: string) => void
+  ): Promise<string> {
+    const aiStore = useAIStore()
+    if (!aiStore.activeProvider) throw new Error('请先配置 AI Provider')
+    loading.value = true
+    try {
+      const templates = await loadPromptTemplates()
+      const prompt = renderPrompt(templates.CHAPTER_POLISH, { content })
+      return await callAI(
+        aiStore.activeProvider,
+        [
+          { role: 'system', content: '你是一名顶级中文网络小说作者。' },
+          { role: 'user', content: prompt }
+        ],
+        undefined,
+        { onToken }
+      )
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function deAIContent(
+    content: string,
+    onToken?: (token: string) => void
+  ): Promise<string> {
+    const aiStore = useAIStore()
+    if (!aiStore.activeProvider) throw new Error('请先配置 AI Provider')
+    loading.value = true
+    try {
+      const templates = await loadPromptTemplates()
+      const prompt = renderPrompt(templates.CHAPTER_DE_AI, { content })
+      return await callAI(
+        aiStore.activeProvider,
+        [
+          { role: 'system', content: '你是一名顶级中文网络小说作者。' },
+          { role: 'user', content: prompt }
+        ],
+        undefined,
+        { onToken }
+      )
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function generateSummary(
+    content: string,
+    onToken?: (token: string) => void
+  ): Promise<string> {
+    const aiStore = useAIStore()
+    if (!aiStore.activeProvider) throw new Error('请先配置 AI Provider')
+    loading.value = true
+    try {
+      const templates = await loadPromptTemplates()
+      const prompt = renderPrompt(templates.CHAPTER_SUMMARY, { content })
+      const result = await callAI(
+        aiStore.activeProvider,
+        [
+          { role: 'system', content: '你是一名专业的小说编辑。' },
+          { role: 'user', content: prompt }
+        ],
+        undefined,
+        { onToken }
+      )
+
+      // Save summary to memory/summaries.json
+      const projectStore = useProjectStore()
+      if (window.electronAPI && projectStore.currentProjectName) {
+        const dir = await projectStore.getProjectDir()
+        const summaryPath = await window.electronAPI.pathJoin(dir, 'memory', 'summaries.json')
+        let summaries: Array<{ id: string; content: string; createdAt: string }> = []
+        try {
+          const raw = await window.electronAPI.readFile(summaryPath)
+          summaries = JSON.parse(raw)
+          if (!Array.isArray(summaries)) summaries = []
+        } catch { /* empty */ }
+        summaries.push({ id: nanoid(), content: result, createdAt: new Date().toISOString() })
+        await window.electronAPI.writeFile(summaryPath, JSON.stringify(summaries, null, 2))
+      }
+
+      return result
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function checkConsistency(
+    content: string,
+    onToken?: (token: string) => void
+  ): Promise<string> {
+    const aiStore = useAIStore()
+    if (!aiStore.activeProvider) throw new Error('请先配置 AI Provider')
+    loading.value = true
+    try {
+      const templates = await loadPromptTemplates()
+      const ctx = await buildContext()
+      const prompt = renderPrompt(templates.CONSISTENCY_CHECK, {
+        characters: ctx.characters,
+        worldview: ctx.worldview,
+        content
+      })
+      return await callAI(
+        aiStore.activeProvider,
+        [
+          { role: 'system', content: '你是一名专业的小说编辑，擅长检查逻辑一致性。' },
+          { role: 'user', content: prompt }
+        ],
+        undefined,
+        { onToken }
+      )
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function getWritingSuggestions(
+    currentContent: string,
+    onToken?: (token: string) => void
+  ): Promise<string> {
+    const aiStore = useAIStore()
+    if (!aiStore.activeProvider) throw new Error('请先配置 AI Provider')
+    loading.value = true
+    try {
+      const templates = await loadPromptTemplates()
+      const ctx = await buildContext()
+
+      // Load outline
+      const projectStore = useProjectStore()
+      let outline = ''
+      if (window.electronAPI && projectStore.currentProjectName) {
+        const dir = await projectStore.getProjectDir()
+        try {
+          outline = await window.electronAPI.readFile(
+            await window.electronAPI.pathJoin(dir, 'outline', '总纲.md')
+          )
+        } catch { /* not found */ }
+      }
+
+      const prompt = renderPrompt(templates.WRITING_ASSISTANT, {
+        outline,
+        characters: ctx.characters,
+        prevSummary: ctx.prevSummary,
+        currentContent
+      })
+      return await callAI(
+        aiStore.activeProvider,
+        [
+          { role: 'system', content: '你是一名经验丰富的中文网络小说创作顾问。' },
+          { role: 'user', content: prompt }
+        ],
+        undefined,
+        { onToken }
+      )
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function generateTitles(
+    outline: string,
+    summary: string,
+    onToken?: (token: string) => void
+  ): Promise<string> {
+    const aiStore = useAIStore()
+    if (!aiStore.activeProvider) throw new Error('请先配置 AI Provider')
+    loading.value = true
+    try {
+      const templates = await loadPromptTemplates()
+      const prompt = renderPrompt(templates.TITLE_GEN, { outline, summary })
+      return await callAI(
+        aiStore.activeProvider,
+        [
+          { role: 'system', content: '你是一名专业的小说编辑。请以纯JSON数组格式输出。' },
+          { role: 'user', content: prompt }
+        ],
+        undefined,
+        { onToken }
+      )
+    } finally {
+      loading.value = false
+    }
+  }
+
+  return {
+    chapters,
+    currentContent,
+    loading,
+    loadChapters,
+    loadChapterContent,
+    saveChapterContent,
+    createChapter,
+    generateOutline,
+    generateContent,
+    polishContent,
+    deAIContent,
+    buildContext,
+    generateSummary,
+    checkConsistency,
+    getWritingSuggestions,
+    generateTitles
+  }
+})
+
+
+// ===========================================================
+// 文件路径：src/stores/character.ts
+// 代码行数：185
+// ===========================================================
+
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+import { nanoid } from 'nanoid'
+import type { Character, Relationship } from '@/types/character'
+import { useProjectStore } from '@/stores/project'
+import { useAIStore } from '@/stores/ai'
+import { callAI } from '@/api/ai'
+import { renderPrompt, BUILTIN_TEMPLATES } from '@/utils/promptTemplates'
+
+export const useCharacterStore = defineStore('character', () => {
+  const characters = ref<Character[]>([])
+  const relationships = ref<Relationship[]>([])
+  const loading = ref(false)
+
+  async function loadCharacters() {
+    const projectStore = useProjectStore()
+    if (!window.electronAPI || !projectStore.currentProjectName) return
+    const dir = await projectStore.getProjectDir()
+    const charDir = await window.electronAPI.pathJoin(dir, 'characters')
+    await window.electronAPI.ensureDirectory(charDir)
+    const entries = await window.electronAPI.listFiles(charDir)
+    const jsonFiles = entries.filter((e: { name: string; isDirectory: boolean }) => !e.isDirectory && e.name.endsWith('.json'))
+
+    const loaded: Character[] = []
+    for (const file of jsonFiles) {
+      try {
+        const content = await window.electronAPI.readFile(
+          await window.electronAPI.pathJoin(charDir, file.name)
+        )
+        loaded.push(JSON.parse(content))
+      } catch { /* skip */ }
+    }
+    characters.value = loaded
+  }
+
+  async function saveCharacter(character: Character) {
+    const projectStore = useProjectStore()
+    if (!window.electronAPI || !projectStore.currentProjectName) return
+    const dir = await projectStore.getProjectDir()
+    const charDir = await window.electronAPI.pathJoin(dir, 'characters')
+    const filePath = await window.electronAPI.pathJoin(charDir, `${character.name}.json`)
+    await window.electronAPI.writeFile(filePath, JSON.stringify(character, null, 2))
+
+    const index = characters.value.findIndex(c => c.id === character.id)
+    if (index !== -1) {
+      characters.value[index] = character
+    } else {
+      characters.value.push(character)
+    }
+  }
+
+  async function deleteCharacter(character: Character) {
+    const projectStore = useProjectStore()
+    if (!window.electronAPI || !projectStore.currentProjectName) return
+    const dir = await projectStore.getProjectDir()
+    const filePath = await window.electronAPI.pathJoin(dir, 'characters', `${character.name}.json`)
+    try {
+      await window.electronAPI.deleteFile(filePath)
+    } catch { /* file might not exist */ }
+    characters.value = characters.value.filter(c => c.id !== character.id)
+  }
+
+  function createEmptyCharacter(): Character {
+    const now = new Date().toISOString()
+    return {
+      id: nanoid(),
+      name: '',
+      gender: '',
+      age: 0,
+      personality: '',
+      background: '',
+      skills: [],
+      items: [],
+      speechStyle: '',
+      goal: '',
+      secret: '',
+      role: 'supporting',
+      createdAt: now,
+      updatedAt: now
+    }
+  }
+
+  async function generateCharacter(hint: string): Promise<Character> {
+    const aiStore = useAIStore()
+    if (!aiStore.activeProvider) throw new Error('请先配置 AI Provider')
+
+    loading.value = true
+    try {
+      const projectStore = useProjectStore()
+      const dir = await projectStore.getProjectDir()
+      const promptPath = await window.electronAPI.pathJoin(dir, 'settings', 'prompt.json')
+      let templates = BUILTIN_TEMPLATES
+      try {
+        const content = await window.electronAPI.readFile(promptPath)
+        templates = { ...BUILTIN_TEMPLATES, ...JSON.parse(content) }
+      } catch { /* use defaults */ }
+
+      const prompt = renderPrompt(templates.CHARACTER_GEN, { hint })
+
+      const result = await callAI(aiStore.activeProvider, [
+        { role: 'system', content: '你是一名专业的小说角色设计师。请以纯JSON格式输出。' },
+        { role: 'user', content: prompt }
+      ])
+
+      // Parse JSON from response (handle markdown code blocks)
+      const jsonMatch = result.match(/\{[\s\S]*\}/)
+      if (!jsonMatch) throw new Error('AI 返回的不是有效 JSON')
+
+      const data = JSON.parse(jsonMatch[0])
+      const now = new Date().toISOString()
+      return {
+        id: nanoid(),
+        name: data.name || '',
+        gender: data.gender || '',
+        age: data.age || 0,
+        personality: data.personality || '',
+        background: data.background || '',
+        skills: Array.isArray(data.skills) ? data.skills : [],
+        items: Array.isArray(data.items) ? data.items : [],
+        speechStyle: data.speechStyle || '',
+        goal: data.goal || '',
+        secret: data.secret || '',
+        role: 'supporting',
+        createdAt: now,
+        updatedAt: now
+      }
+    } finally {
+      loading.value = false
+    }
+  }
+
+  // Relationships
+  async function loadRelationships() {
+    const projectStore = useProjectStore()
+    if (!window.electronAPI || !projectStore.currentProjectName) return
+    const dir = await projectStore.getProjectDir()
+    const filePath = await window.electronAPI.pathJoin(dir, 'graph', 'relations.json')
+    try {
+      const content = await window.electronAPI.readFile(filePath)
+      const data = JSON.parse(content)
+      relationships.value = data.edges || []
+    } catch {
+      relationships.value = []
+    }
+  }
+
+  async function saveRelationships() {
+    const projectStore = useProjectStore()
+    if (!window.electronAPI || !projectStore.currentProjectName) return
+    const dir = await projectStore.getProjectDir()
+    const filePath = await window.electronAPI.pathJoin(dir, 'graph', 'relations.json')
+    const data = {
+      nodes: characters.value.map(c => ({ id: c.id, name: c.name, role: c.role })),
+      edges: relationships.value
+    }
+    await window.electronAPI.writeFile(filePath, JSON.stringify(data, null, 2))
+  }
+
+  function addRelationship(rel: Omit<Relationship, 'id'>) {
+    const newRel: Relationship = { ...rel, id: nanoid() }
+    relationships.value.push(newRel)
+    saveRelationships()
+    return newRel
+  }
+
+  function removeRelationship(id: string) {
+    relationships.value = relationships.value.filter(r => r.id !== id)
+    saveRelationships()
+  }
+
+  return {
+    characters,
+    relationships,
+    loading,
+    loadCharacters,
+    saveCharacter,
+    deleteCharacter,
+    createEmptyCharacter,
+    generateCharacter,
+    loadRelationships,
+    saveRelationships,
+    addRelationship,
+    removeRelationship
+  }
+})
+
+
+// ===========================================================
+// 文件路径：src/utils/promptTemplates.ts
+// 代码行数：360
+// ===========================================================
+
+/**
+ * 替换模板中的 {{变量名}} 占位符
+ */
+export function renderPrompt(
+  template: string,
+  variables: Record<string, string>
+): string {
+  let result = template
+  for (const [key, value] of Object.entries(variables)) {
+    const placeholder = key.startsWith('{{') ? key : `{{${key}}}`
+    result = result.replaceAll(placeholder, value || '')
+  }
+  return result
+}
+
+// ========== 内置 Prompt 模板 ==========
+
+export const BUILTIN_TEMPLATES: Record<string, string> = {
+  OUTLINE_POLISH: `你是一名拥有20年以上经验的中文网络小说总编剧。
+
+请对下面的大纲进行深度润色与商业化优化。
+
+要求：
+1. 保持故事核心不变
+2. 增强人物动机
+3. 增强剧情冲突
+4. 强化爽点与反转
+5. 减少AI生成痕迹
+6. 避免模板化表达
+7. 避免重复句式
+8. 不要使用"随后""与此同时""然而"等AI高频连接词
+9. 语言风格更像成熟网文作者
+10. 增强画面感与情绪张力
+
+请重点检查：
+- 剧情逻辑
+- 人物行为合理性
+- 世界观冲突
+- 主角成长曲线
+- 爽点分布
+- 伏笔回收
+
+输出格式：
+1. 优化后的大纲
+2. 大纲问题分析
+3. 可继续扩展的剧情方向
+
+---原始大纲---
+{{outline}}`,
+
+  OUTLINE_EXPAND: `请将下面的简要大纲扩写为详细大纲。
+
+要求：
+1. 每个阶段包含具体事件
+2. 补充人物动机
+3. 增加冲突设计
+4. 标注爽点位置
+5. 标注伏笔设置与回收
+6. 增加感情线节点
+7. 不要流水账
+
+输出详细大纲。
+
+---原始大纲---
+{{outline}}`,
+
+  CHAPTER_OUTLINE_GEN: `请根据卷纲与章节目标，生成详细章节细纲。
+
+要求：
+1. 每个场景必须有目的
+2. 每段剧情必须推动故事
+3. 每章必须有情绪起伏
+4. 必须有冲突
+5. 必须有悬念
+6. 避免平铺直叙
+7. 避免无意义对白
+8. 每章都要有记忆点
+
+输出：
+- 场景拆解
+- 人物目标
+- 冲突点
+- 情绪变化
+- 伏笔
+- 高潮点
+- 结尾悬念
+
+---卷纲---
+{{volumeOutline}}
+
+---上一章摘要---
+{{prevSummary}}
+
+---人物设定---
+{{characters}}`,
+
+  CHAPTER_CONTENT_GEN: `你是一名顶级中文网络小说作者。
+
+请根据以下内容生成章节正文。
+
+【核心要求】
+1. 严禁AI化表达
+2. 不允许出现总结式语气
+3. 不允许旁白解释剧情
+4. 不允许流水账推进
+5. 不允许重复句式
+6. 不允许频繁使用"随后""接着""与此同时"
+7. 不允许大量短句堆叠
+8. 不允许模板化装逼打脸
+9. 不允许角色说话像机器人
+
+【写作风格】
+1. 更像起点、番茄成熟作者
+2. 强化环境细节、动作细节、情绪递进
+3. 对话必须自然，角色必须有性格差异
+4. 增强沉浸感
+5. 用剧情自然展现设定，避免解释世界观
+
+【剧情要求】
+1. 本章必须有冲突和情绪波动
+2. 必须推动主线并留下悬念
+3. 节奏不能太平
+
+【角色一致性】
+{{characters}}
+
+【世界观】
+{{worldview}}
+
+【上文摘要】
+{{prevSummary}}
+
+【本章细纲】
+{{chapterOutline}}
+
+输出要求：
+- 直接输出正文
+- 不要解释、不要分点
+- 不要出现"以下是正文"
+- 字数：3000-5000字`,
+
+  CHAPTER_POLISH: `请对下面的小说内容进行润色。
+
+要求：
+1. 保持剧情不变
+2. 增强文字表现力
+3. 改善对话自然度
+4. 增加细节描写
+5. 调整节奏
+6. 保持人物设定一致
+7. 不要过度修辞
+8. 保持网文阅读爽感
+
+输出润色后的正文。
+
+---原始内容---
+{{content}}`,
+
+  CHAPTER_DE_AI: `请对下面的小说内容进行"去AI化重写"。
+
+目标：让文本更像真人作者创作，而不是AI生成。
+
+要求：
+1. 打散重复句式
+2. 减少工整结构
+3. 增加自然语言波动
+4. 增加情绪起伏和临场反应
+5. 删除机械过渡句和AI常见连接词
+6. 删除"总结式"结尾
+7. 保持剧情、人物设定、世界观不变
+8. 不要文青化，不要过度修辞
+9. 保持网文阅读爽感
+
+重点优化：对话真实感、战斗画面、情绪描写、环境描写、人物动作、节奏变化
+
+输出最终版本正文。
+
+---原始内容---
+{{content}}`,
+
+  CHARACTER_GEN: `请创建一个真实、有血有肉的小说角色。
+
+要求：
+1. 不要脸谱化，不要完美人格
+2. 必须有缺点、欲望、成长空间
+3. 说话方式要独特
+4. 行为逻辑必须合理
+5. 必须有过去经历影响现在
+6. 不要AI模板角色
+
+输出JSON格式：
+{
+  "name": "",
+  "gender": "",
+  "age": 0,
+  "personality": "",
+  "background": "",
+  "skills": [],
+  "items": [],
+  "speechStyle": "",
+  "goal": "",
+  "secret": ""
+}
+
+---角色提示---
+{{hint}}`,
+
+  CHARACTER_RELATION_ANALYSIS: `请分析以下小说内容中的人物关系。
+
+输出JSON数组格式：
+[
+  {
+    "source": "人物A",
+    "target": "人物B",
+    "type": "friend|enemy|lover|master|subordinate|kin|rival|ally|betrayal",
+    "description": "关系描述",
+    "strength": 1-10
+  }
+]
+
+---人物列表---
+{{characters}}
+
+---小说内容---
+{{content}}`,
+
+  CHAPTER_SUMMARY: `请对以下章节内容生成简洁的摘要，用于后续章节的上下文记忆。
+
+要求：
+1. 摘要控制在200字以内
+2. 记录关键事件和人物行动
+3. 记录人物关系变化
+4. 记录伏笔和悬念
+5. 记录重要物品或能力变化
+6. 使用第三人称客观描述
+
+---章节内容---
+{{content}}`,
+
+  WRITING_ASSISTANT: `你是一名经验丰富的中文网络小说创作顾问。
+
+当前小说信息：
+【总纲】
+{{outline}}
+
+【人物设定】
+{{characters}}
+
+【上一章摘要】
+{{prevSummary}}
+
+【当前章节内容（如有）】
+{{currentContent}}
+
+请提供创作建议：
+1. 下一章可以发展的3个剧情方向
+2. 当前可以设置的冲突点
+3. 可以安排的爽点
+4. 人物关系可以如何推进
+5. 可以埋下的伏笔
+
+每个建议要具体、可执行，不要空泛。`,
+
+  AI_PROJECT_GEN: `用户想要创作一本小说，基本信息如下：
+
+类型：{{type}}
+风格：{{style}}
+简要描述：{{description}}
+
+请根据以上信息，生成完整的小说设定。
+
+输出JSON格式：
+{
+  "worldview": "详细世界观设定，包含世界背景、历史、势力、修炼体系等",
+  "outline": "总纲，包含主线剧情、核心冲突、主角成长路线",
+  "subplots": "支线剧情设计",
+  "characters": [
+    {
+      "name": "角色名",
+      "gender": "性别",
+      "age": 年龄,
+      "personality": "性格",
+      "background": "背景",
+      "role": "protagonist|antagonist|supporting",
+      "goal": "目标",
+      "secret": "秘密"
+    }
+  ]
+}
+
+要求：
+1. 世界观要自洽且有深度
+2. 能支撑百万字剧情
+3. 有商业化爽点
+4. 人物有血有肉
+5. 不要AI模板化`,
+
+  AUTO_VOLUME_SPLIT: `请根据下面的小说总纲，自动拆分为多个卷。
+
+要求：
+1. 每卷都有明确主题和核心冲突
+2. 每卷都要有高潮点和悬念
+3. 卷与卷之间逻辑连贯
+4. 爽点需要逐渐升级
+5. 主角成长曲线清晰
+
+输出JSON数组格式：
+[
+  {
+    "name": "卷名",
+    "description": "卷简介",
+    "targetWordCount": 预计字数
+  }
+]
+
+---总纲---
+{{outline}}`,
+
+  TITLE_GEN: `请根据以下内容，生成5个有吸引力的章节标题。
+
+要求：
+1. 标题要简洁有力
+2. 要有悬念感
+3. 符合中文网文风格
+4. 不要过于文艺
+5. 不要使用数字编号
+
+---章节细纲---
+{{outline}}
+
+---章节内容摘要---
+{{summary}}
+
+输出JSON数组格式：["标题1", "标题2", "标题3", "标题4", "标题5"]`,
+
+  CONSISTENCY_CHECK: `请检查下面小说内容是否存在设定冲突。
+
+检查：
+1. 人物性格是否崩坏
+2. 人物能力是否错误
+3. 时间线是否冲突
+4. 世界观是否冲突
+5. 人物关系是否合理
+6. 物品是否前后矛盾
+7. 是否遗忘伏笔
+
+输出：
+- 问题位置
+- 问题类型
+- 修复建议
+
+---人物设定---
+{{characters}}
+
+---世界观---
+{{worldview}}
+
+---章节内容---
+{{content}}`
+}
+
+
+// ===========================================================
+// 文件路径：src/components/AppSidebar.vue
+// 代码行数：147
+// ===========================================================
+
+<template>
+  <n-layout-sider
+    bordered
+    collapse-mode="width"
+    :collapsed-width="64"
+    :width="220"
+    show-trigger
+    :collapsed="collapsed"
+    @update:collapsed="collapsed = $event"
+  >
+    <div class="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-title" v-if="!collapsed">AI小说助手</span>
+        <span v-else style="font-size: 18px; font-weight: bold;">AI</span>
+      </div>
+
+      <n-menu
+        :collapsed="collapsed"
+        :collapsed-width="64"
+        :collapsed-icon-size="22"
+        :options="menuOptions"
+        :value="activeKey"
+        @update:value="handleMenuSelect"
+      />
+
+      <div class="sidebar-footer">
+        <n-button
+          quaternary
+          circle
+          size="small"
+          @click="appStore.toggleTheme()"
+        >
+          <template #icon>
+            <n-icon size="18">
+              <svg v-if="appStore.isDark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+              <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
+            </n-icon>
+          </template>
+        </n-button>
+      </div>
+    </div>
+  </n-layout-sider>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, h } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
+import type { MenuOption } from 'naive-ui'
+import { useAppStore } from '@/stores/app'
+import { useProjectStore } from '@/stores/project'
+
+const router = useRouter()
+const route = useRoute()
+const appStore = useAppStore()
+const projectStore = useProjectStore()
+
+const collapsed = ref(false)
+
+const icons = {
+  home: '&#127968;',
+  doc: '&#128196;',
+  book: '&#128214;',
+  people: '&#128101;',
+  graph: '&#128202;',
+  settings: '&#9881;'
+}
+
+function renderIcon(emoji: string) {
+  return () => h('span', { style: 'font-size: 18px; line-height: 1;' }, emoji)
+}
+
+const menuOptions = computed<MenuOption[]>(() => {
+  const base: MenuOption[] = [
+    {
+      label: '项目列表',
+      key: 'home',
+      icon: renderIcon('\u{1F3E0}')
+    }
+  ]
+
+  if (projectStore.currentProject) {
+    base.push(
+      { type: 'divider', key: 'd1' },
+      { label: '大纲', key: 'outline', icon: renderIcon('\u{1F4DD}') },
+      { label: '卷与章节', key: 'volumes', icon: renderIcon('\u{1F4D6}') },
+      { label: '人物', key: 'characters', icon: renderIcon('\u{1F465}') },
+      { label: '关系图谱', key: 'graph', icon: renderIcon('\u{1F4CA}') }
+    )
+  }
+
+  base.push(
+    { type: 'divider', key: 'd2' },
+    { label: '设置', key: 'settings', icon: renderIcon('⚙️') }
+  )
+
+  return base
+})
+
+const activeKey = computed(() => {
+  if (route.name === 'home') return 'home'
+  if (route.name === 'settings') return 'settings'
+  if (route.path.includes('/outline')) return 'outline'
+  if (route.path.includes('/volumes') || route.path.includes('/chapters')) return 'volumes'
+  if (route.path.includes('/characters')) return 'characters'
+  if (route.path.includes('/graph')) return 'graph'
+  return 'home'
+})
+
+function handleMenuSelect(key: string) {
+  if (key === 'home') {
+    router.push('/')
+  } else if (key === 'settings') {
+    router.push('/settings')
+  } else if (projectStore.currentProjectName) {
+    router.push(`/project/${projectStore.currentProjectName}/${key}`)
+  }
+}
+</script>
+
+<style scoped>
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.sidebar-header {
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 56px;
+}
+
+.sidebar-title {
+  font-size: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: 12px;
+  display: flex;
+  justify-content: center;
+}
+</style>
+
+
+// ===========================================================
+// 文件路径：src/components/CreateProjectModal.vue
+// 代码行数：265
+// ===========================================================
+
+<template>
+  <n-modal v-model:show="visible" preset="card" title="创建新小说" style="width: 560px;">
+    <n-form ref="formRef" :model="form" :rules="rules" label-placement="left" label-width="80">
+      <n-form-item label="小说名称" path="name">
+        <n-input v-model:value="form.name" placeholder="请输入小说名称" />
+      </n-form-item>
+      <n-form-item label="类型" path="type">
+        <n-select v-model:value="form.type" :options="typeOptions" placeholder="选择类型" />
+      </n-form-item>
+      <n-form-item label="风格" path="style">
+        <n-select v-model:value="form.style" :options="styleOptions" placeholder="选择风格" />
+      </n-form-item>
+      <n-form-item label="目标字数" path="targetWordCount">
+        <n-input-number v-model:value="form.targetWordCount" :min="10000" :step="100000" style="width: 100%;" placeholder="例: 1000000">
+          <template #suffix>字</template>
+        </n-input-number>
+      </n-form-item>
+      <n-form-item label="目标平台">
+        <n-select v-model:value="form.targetPlatform" :options="platformOptions" placeholder="选择平台" clearable />
+      </n-form-item>
+      <n-form-item label="视角">
+        <n-radio-group v-model:value="form.perspective">
+          <n-radio value="third">第三人称</n-radio>
+          <n-radio value="first">第一人称</n-radio>
+        </n-radio-group>
+      </n-form-item>
+      <n-form-item label="受众">
+        <n-radio-group v-model:value="form.audience">
+          <n-radio value="male">男频</n-radio>
+          <n-radio value="female">女频</n-radio>
+        </n-radio-group>
+      </n-form-item>
+      <n-form-item label="节奏">
+        <n-select v-model:value="form.pacing" :options="pacingOptions" placeholder="选择节奏" />
+      </n-form-item>
+      <n-form-item label="简介">
+        <n-input v-model:value="form.description" type="textarea" :rows="3" placeholder="简单描述你的小说创意..." />
+      </n-form-item>
+    </n-form>
+
+    <n-collapse v-if="aiResult" style="margin-top: 12px;">
+      <n-collapse-item title="AI 生成的设定（可编辑）" name="ai-result">
+        <n-tabs type="line" size="small">
+          <n-tab-pane name="worldview" tab="世界观">
+            <n-input v-model:value="aiResult.worldview" type="textarea" :autosize="{ minRows: 6, maxRows: 15 }" />
+          </n-tab-pane>
+          <n-tab-pane name="outline" tab="总纲">
+            <n-input v-model:value="aiResult.outline" type="textarea" :autosize="{ minRows: 6, maxRows: 15 }" />
+          </n-tab-pane>
+          <n-tab-pane name="subplots" tab="支线">
+            <n-input v-model:value="aiResult.subplots" type="textarea" :autosize="{ minRows: 4, maxRows: 10 }" />
+          </n-tab-pane>
+          <n-tab-pane name="characters" tab="人物">
+            <n-space vertical size="small">
+              <n-card v-for="(c, i) in aiResult.characters" :key="i" size="small">
+                <n-space vertical size="small">
+                  <n-space>
+                    <n-input v-model:value="c.name" size="small" style="width: 100px;" placeholder="姓名" />
+                    <n-tag size="small" :type="c.role === 'protagonist' ? 'warning' : c.role === 'antagonist' ? 'error' : 'info'">
+                      {{ c.role === 'protagonist' ? '主角' : c.role === 'antagonist' ? '反派' : '配角' }}
+                    </n-tag>
+                  </n-space>
+                  <n-input v-model:value="c.personality" size="small" placeholder="性格" />
+                  <n-input v-model:value="c.background" size="small" type="textarea" :rows="2" placeholder="背景" />
+                </n-space>
+              </n-card>
+            </n-space>
+          </n-tab-pane>
+        </n-tabs>
+      </n-collapse-item>
+    </n-collapse>
+
+    <template #action>
+      <n-space justify="end">
+        <n-button @click="visible = false">取消</n-button>
+        <n-button :loading="aiLoading" :disabled="!form.type || !form.description" @click="handleAIGenerate">
+          AI 生成设定
+        </n-button>
+        <n-button type="primary" :loading="loading" @click="handleSubmit">创建</n-button>
+      </n-space>
+    </template>
+  </n-modal>
+</template>
+
+<script setup lang="ts">
+import { ref, reactive, watch } from 'vue'
+import { useMessage } from 'naive-ui'
+import type { FormInst, FormRules } from 'naive-ui'
+import { useProjectStore } from '@/stores/project'
+import { useAIStore } from '@/stores/ai'
+import { callAI } from '@/api/ai'
+import { renderPrompt, BUILTIN_TEMPLATES } from '@/utils/promptTemplates'
+import { nanoid } from 'nanoid'
+import { NOVEL_TYPES, NOVEL_STYLES, TARGET_PLATFORMS, PACING_OPTIONS } from '@/types/project'
+
+const props = defineProps<{ show: boolean }>()
+const emit = defineEmits<{
+  'update:show': [value: boolean]
+  'created': [name: string]
+}>()
+
+const message = useMessage()
+const projectStore = useProjectStore()
+const aiStore = useAIStore()
+const formRef = ref<FormInst | null>(null)
+const loading = ref(false)
+const aiLoading = ref(false)
+
+const visible = ref(props.show)
+watch(() => props.show, v => visible.value = v)
+watch(visible, v => emit('update:show', v))
+
+const form = reactive({
+  name: '',
+  type: '东方玄幻',
+  style: '爽文',
+  tags: [] as string[],
+  targetWordCount: 1000000,
+  targetPlatform: '起点',
+  perspective: 'third' as 'first' | 'third',
+  audience: 'male' as 'male' | 'female',
+  pacing: '快节奏',
+  description: ''
+})
+
+interface AIResult {
+  worldview: string
+  outline: string
+  subplots: string
+  characters: Array<{
+    name: string
+    gender: string
+    age: number
+    personality: string
+    background: string
+    role: string
+    goal: string
+    secret: string
+  }>
+}
+
+const aiResult = ref<AIResult | null>(null)
+
+const rules: FormRules = {
+  name: { required: true, message: '请输入小说名称', trigger: 'blur' },
+  type: { required: true, message: '请选择类型', trigger: 'change' },
+  style: { required: true, message: '请选择风格', trigger: 'change' },
+  targetWordCount: { required: true, type: 'number', message: '请输入目标字数', trigger: 'blur' }
+}
+
+const typeOptions = NOVEL_TYPES.map(t => ({ label: t, value: t }))
+const styleOptions = NOVEL_STYLES.map(s => ({ label: s, value: s }))
+const platformOptions = TARGET_PLATFORMS.map(p => ({ label: p, value: p }))
+const pacingOptions = PACING_OPTIONS.map(p => ({ label: p, value: p }))
+
+async function handleAIGenerate() {
+  if (!aiStore.activeProvider) {
+    message.warning('请先在设置中配置 AI Provider')
+    return
+  }
+  aiLoading.value = true
+  try {
+    const prompt = renderPrompt(BUILTIN_TEMPLATES.AI_PROJECT_GEN, {
+      type: form.type,
+      style: form.style,
+      description: form.description
+    })
+    const result = await callAI(aiStore.activeProvider, [
+      { role: 'system', content: '你是一名专业的小说策划编辑。请以纯JSON格式输出。' },
+      { role: 'user', content: prompt }
+    ])
+
+    const jsonMatch = result.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) throw new Error('AI 返回格式不正确')
+    const data = JSON.parse(jsonMatch[0])
+    aiResult.value = {
+      worldview: data.worldview || '',
+      outline: data.outline || '',
+      subplots: data.subplots || '',
+      characters: Array.isArray(data.characters) ? data.characters : []
+    }
+    message.success('AI 设定已生成，可编辑后创建')
+  } catch (e: any) {
+    message.error('AI 生成失败: ' + (e.message || '未知错误'))
+  } finally {
+    aiLoading.value = false
+  }
+}
+
+async function handleSubmit() {
+  try {
+    await formRef.value?.validate()
+  } catch { return }
+
+  loading.value = true
+  try {
+    await projectStore.createProject({ ...form })
+
+    // Write AI-generated content to project files
+    if (aiResult.value && window.electronAPI) {
+      const dir = await projectStore.getProjectDir(form.name)
+
+      // Write worldview
+      if (aiResult.value.worldview) {
+        await window.electronAPI.writeFile(
+          await window.electronAPI.pathJoin(dir, 'outline', '世界观.md'),
+          `# 世界观\n\n${aiResult.value.worldview}`
+        )
+      }
+
+      // Write outline
+      if (aiResult.value.outline) {
+        await window.electronAPI.writeFile(
+          await window.electronAPI.pathJoin(dir, 'outline', '总纲.md'),
+          `# 总纲\n\n${aiResult.value.outline}`
+        )
+      }
+
+      // Write subplots
+      if (aiResult.value.subplots) {
+        await window.electronAPI.writeFile(
+          await window.electronAPI.pathJoin(dir, 'outline', '支线.md'),
+          `# 支线\n\n${aiResult.value.subplots}`
+        )
+      }
+
+      // Write characters
+      const charDir = await window.electronAPI.pathJoin(dir, 'characters')
+      await window.electronAPI.ensureDirectory(charDir)
+      for (const c of aiResult.value.characters) {
+        if (!c.name) continue
+        const char = {
+          id: nanoid(),
+          name: c.name,
+          gender: c.gender || '',
+          age: c.age || 0,
+          personality: c.personality || '',
+          background: c.background || '',
+          skills: [] as string[],
+          items: [] as string[],
+          speechStyle: '',
+          goal: c.goal || '',
+          secret: c.secret || '',
+          role: c.role || 'supporting',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        }
+        await window.electronAPI.writeFile(
+          await window.electronAPI.pathJoin(charDir, `${c.name}.json`),
+          JSON.stringify(char, null, 2)
+        )
+      }
+    }
+
+    emit('created', form.name)
+    form.name = ''
+    form.description = ''
+    aiResult.value = null
+  } catch (e: any) {
+    message.error('创建失败: ' + (e.message || '未知错误'))
+  } finally {
+    loading.value = false
+  }
+}
+</script>
+
+
+// ===========================================================
+// 文件路径：src/components/MarkdownEditor.vue
+// 代码行数：171
+// ===========================================================
+
+<template>
+  <div class="editor-wrapper">
+    <div class="editor-toolbar">
+      <n-button-group size="small">
+        <n-button @click="insertFormat('**', '**')" title="粗体">B</n-button>
+        <n-button @click="insertFormat('*', '*')" title="斜体"><i>I</i></n-button>
+        <n-button @click="insertFormat('\n> ', '')" title="引用">"</n-button>
+        <n-button @click="insertFormat('\n---\n', '')" title="分割线">—</n-button>
+      </n-button-group>
+      <n-space align="center">
+        <n-text depth="3" style="font-size: 12px;">{{ wordCount }} 字</n-text>
+        <n-text v-if="saving" depth="3" style="font-size: 12px;">保存中...</n-text>
+        <n-text v-else-if="lastSaved" depth="3" style="font-size: 12px; color: #18a058;">已保存</n-text>
+      </n-space>
+    </div>
+    <div class="editor-body">
+      <textarea
+        ref="textareaRef"
+        :value="modelValue"
+        @input="handleInput"
+        @keydown.ctrl.s.prevent="handleSave"
+        class="editor-textarea"
+        :placeholder="placeholder"
+      />
+      <div class="editor-preview" v-if="showPreview">
+        <div class="preview-content" v-html="renderedPreview" />
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, watch, nextTick } from 'vue'
+import { marked } from 'marked'
+import { countWords } from '@/utils/wordCount'
+
+const props = withDefaults(defineProps<{
+  modelValue: string
+  placeholder?: string
+  showPreview?: boolean
+}>(), {
+  placeholder: '开始写作...',
+  showPreview: true
+})
+
+const emit = defineEmits<{
+  'update:modelValue': [value: string]
+  'save': []
+}>()
+
+const textareaRef = ref<HTMLTextAreaElement | null>(null)
+const saving = ref(false)
+const lastSaved = ref(false)
+let saveTimer: ReturnType<typeof setTimeout> | null = null
+
+const wordCount = computed(() => countWords(props.modelValue))
+
+const renderedPreview = computed(() => {
+  return marked.parse(props.modelValue || '*暂无内容*') as string
+})
+
+function handleInput(e: Event) {
+  const value = (e.target as HTMLTextAreaElement).value
+  emit('update:modelValue', value)
+  lastSaved.value = false
+
+  // Auto-save after 2 seconds of inactivity
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = setTimeout(() => {
+    handleSave()
+  }, 2000)
+}
+
+function handleSave() {
+  if (saveTimer) clearTimeout(saveTimer)
+  saving.value = true
+  emit('save')
+  setTimeout(() => {
+    saving.value = false
+    lastSaved.value = true
+  }, 300)
+}
+
+function insertFormat(before: string, after: string) {
+  const ta = textareaRef.value
+  if (!ta) return
+  const start = ta.selectionStart
+  const end = ta.selectionEnd
+  const text = props.modelValue
+  const selected = text.slice(start, end)
+  const newText = text.slice(0, start) + before + selected + after + text.slice(end)
+  emit('update:modelValue', newText)
+  nextTick(() => {
+    ta.selectionStart = start + before.length
+    ta.selectionEnd = start + before.length + selected.length
+    ta.focus()
+  })
+}
+
+// Scroll to bottom when content changes (for streaming)
+watch(() => props.modelValue.length, () => {
+  if (textareaRef.value) {
+    const { scrollHeight, clientHeight, scrollTop } = textareaRef.value
+    if (scrollHeight - clientHeight - scrollTop < 100) {
+      textareaRef.value.scrollTop = scrollHeight
+    }
+  }
+})
+</script>
+
+<style scoped>
+.editor-wrapper {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  border: 1px solid var(--n-border-color, #e0e0e6);
+  border-radius: 4px;
+}
+
+.editor-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--n-border-color, #e0e0e6);
+  background: var(--n-color, #fff);
+}
+
+.editor-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.editor-textarea {
+  flex: 1;
+  padding: 16px;
+  border: none;
+  outline: none;
+  resize: none;
+  font-family: 'Simsun', 'SimSun', '宋体', monospace;
+  font-size: 16px;
+  line-height: 1.8;
+  background: transparent;
+  color: inherit;
+}
+
+.editor-preview {
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+  border-left: 1px solid var(--n-border-color, #e0e0e6);
+}
+
+.preview-content {
+  font-size: 16px;
+  line-height: 1.8;
+}
+
+.preview-content :deep(p) {
+  margin-bottom: 1em;
+  text-indent: 2em;
+}
+
+.preview-content :deep(h1),
+.preview-content :deep(h2),
+.preview-content :deep(h3) {
+  margin: 1em 0 0.5em;
+  text-indent: 0;
+}
+</style>
+
+
+// ===========================================================
+// 文件路径：src/components/ChapterGenerationPanel.vue
+// 代码行数：354
+// ===========================================================
+
+<template>
+  <div class="gen-panel">
+    <n-tabs type="segment" size="small" default-value="pipeline">
+      <n-tab-pane name="pipeline" tab="生成流水线">
+        <n-steps vertical :current="currentStep" size="small">
+          <!-- Step 1: Generate Outline -->
+          <n-step title="生成细纲">
+            <template #description>
+              <n-space vertical size="small" style="margin-top: 8px;">
+                <n-button size="small" block :loading="chapterStore.loading" @click="handleGenOutline">
+                  生成细纲
+                </n-button>
+                <n-input
+                  v-if="outlineResult"
+                  v-model:value="outlineResult"
+                  type="textarea"
+                  :autosize="{ minRows: 4, maxRows: 12 }"
+                  placeholder="细纲内容"
+                />
+                <n-button v-if="outlineResult" size="small" type="primary" block @click="acceptOutline">
+                  应用细纲
+                </n-button>
+              </n-space>
+            </template>
+          </n-step>
+
+          <!-- Step 2: Generate Content -->
+          <n-step title="生成正文">
+            <template #description>
+              <n-space vertical size="small" style="margin-top: 8px;">
+                <n-button
+                  size="small"
+                  block
+                  :loading="chapterStore.loading"
+                  :disabled="!chapterOutline"
+                  @click="handleGenContent"
+                >
+                  生成正文
+                </n-button>
+                <n-progress
+                  v-if="generatingContent"
+                  type="line"
+                  :show-indicator="false"
+                  status="success"
+                />
+                <n-text v-if="generatingContent" depth="3" style="font-size: 12px;">
+                  正在生成... {{ streamingText.length }} 字
+                </n-text>
+              </n-space>
+            </template>
+          </n-step>
+
+          <!-- Step 3: Polish -->
+          <n-step title="AI 润色">
+            <template #description>
+              <n-space vertical size="small" style="margin-top: 8px;">
+                <n-button
+                  size="small"
+                  block
+                  :loading="chapterStore.loading"
+                  :disabled="!hasContent"
+                  @click="handlePolish"
+                >
+                  AI 润色
+                </n-button>
+              </n-space>
+            </template>
+          </n-step>
+
+          <!-- Step 4: De-AI -->
+          <n-step title="去 AI 味">
+            <template #description>
+              <n-space vertical size="small" style="margin-top: 8px;">
+                <n-button
+                  size="small"
+                  block
+                  :loading="chapterStore.loading"
+                  :disabled="!hasContent"
+                  @click="handleDeAI"
+                >
+                  去 AI 味
+                </n-button>
+              </n-space>
+            </template>
+          </n-step>
+        </n-steps>
+      </n-tab-pane>
+
+      <n-tab-pane name="tools" tab="AI 工具">
+        <n-space vertical size="small">
+          <n-button size="small" block :loading="chapterStore.loading" :disabled="!hasContent" @click="handleGenSummary">
+            生成章节摘要
+          </n-button>
+          <n-button size="small" block :loading="chapterStore.loading" :disabled="!hasContent" @click="handleConsistency">
+            一致性检查
+          </n-button>
+          <n-button size="small" block :loading="chapterStore.loading" @click="handleWritingAssistant">
+            卡文助手
+          </n-button>
+          <n-button size="small" block :loading="chapterStore.loading" :disabled="!chapterOutline" @click="handleGenTitle">
+            AI 生成标题
+          </n-button>
+        </n-space>
+      </n-tab-pane>
+    </n-tabs>
+
+    <!-- AI Result Preview -->
+    <n-card v-if="aiPreview" :title="previewTitle" size="small" style="margin-top: 12px;">
+      <n-input
+        v-model:value="aiPreview"
+        type="textarea"
+        :autosize="{ minRows: 6, maxRows: 20 }"
+      />
+      <template #action>
+        <n-space justify="end">
+          <n-button size="small" @click="aiPreview = ''">关闭</n-button>
+          <n-button v-if="canApplyPreview" size="small" type="primary" @click="acceptAIPreview">应用</n-button>
+        </n-space>
+      </template>
+    </n-card>
+
+    <!-- Title Options -->
+    <n-card v-if="titleOptions.length > 0" title="AI 标题建议" size="small" style="margin-top: 12px;">
+      <n-space vertical size="small">
+        <n-button
+          v-for="(t, i) in titleOptions"
+          :key="i"
+          size="small"
+          block
+          quaternary
+          @click="applyTitle(t)"
+        >
+          {{ t }}
+        </n-button>
+      </n-space>
+    </n-card>
+
+    <!-- Abort Button -->
+    <n-button
+      v-if="chapterStore.loading"
+      block
+      type="error"
+      quaternary
+      size="small"
+      style="margin-top: 8px;"
+      @click="abortGeneration"
+    >
+      停止生成
+    </n-button>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+import { useMessage } from 'naive-ui'
+import { useChapterStore } from '@/stores/chapter'
+
+const props = defineProps<{
+  chapterOutline: string
+  hasContent: boolean
+}>()
+
+const emit = defineEmits<{
+  'update:outline': [value: string]
+  'update:content': [value: string]
+  'update:title': [value: string]
+  'set-status': [status: string]
+}>()
+
+const message = useMessage()
+const chapterStore = useChapterStore()
+
+const currentStep = ref(1)
+const outlineResult = ref('')
+const aiPreview = ref('')
+const streamingText = ref('')
+const generatingContent = ref(false)
+const previewTitle = ref('AI 输出预览')
+const canApplyPreview = ref(true)
+const titleOptions = ref<string[]>([])
+let abortController: AbortController | null = null
+
+function abortGeneration() {
+  abortController?.abort()
+  abortController = null
+  generatingContent.value = false
+}
+
+async function handleGenOutline() {
+  outlineResult.value = ''
+  try {
+    await chapterStore.generateOutline('', (token) => {
+      outlineResult.value += token
+    })
+    currentStep.value = 1
+  } catch (e: any) {
+    if (e.name !== 'AbortError') {
+      message.error('生成失败: ' + e.message)
+    }
+  }
+}
+
+function acceptOutline() {
+  emit('update:outline', outlineResult.value)
+  message.success('细纲已应用')
+  currentStep.value = 2
+}
+
+async function handleGenContent() {
+  streamingText.value = ''
+  generatingContent.value = true
+  try {
+    const result = await chapterStore.generateContent(
+      props.chapterOutline,
+      (token) => {
+        streamingText.value += token
+        emit('update:content', streamingText.value)
+      }
+    )
+    currentStep.value = 2
+    emit('set-status', 'generated')
+  } catch (e: any) {
+    if (e.name !== 'AbortError') {
+      message.error('生成失败: ' + e.message)
+    }
+  } finally {
+    generatingContent.value = false
+  }
+}
+
+async function handlePolish() {
+  aiPreview.value = ''
+  previewTitle.value = 'AI 润色结果'
+  canApplyPreview.value = true
+  try {
+    await chapterStore.polishContent(
+      chapterStore.currentContent,
+      (token) => {
+        aiPreview.value += token
+      }
+    )
+    currentStep.value = 3
+  } catch (e: any) {
+    message.error('润色失败: ' + e.message)
+  }
+}
+
+async function handleDeAI() {
+  aiPreview.value = ''
+  previewTitle.value = '去 AI 味结果'
+  canApplyPreview.value = true
+  try {
+    await chapterStore.deAIContent(
+      chapterStore.currentContent,
+      (token) => {
+        aiPreview.value += token
+      }
+    )
+    currentStep.value = 4
+    emit('set-status', 'de_ai')
+  } catch (e: any) {
+    message.error('去AI味失败: ' + e.message)
+  }
+}
+
+async function handleGenSummary() {
+  aiPreview.value = ''
+  previewTitle.value = '章节摘要'
+  canApplyPreview.value = false
+  try {
+    await chapterStore.generateSummary(
+      chapterStore.currentContent,
+      (token) => {
+        aiPreview.value += token
+      }
+    )
+    message.success('摘要已保存到记忆系统')
+  } catch (e: any) {
+    message.error('生成摘要失败: ' + e.message)
+  }
+}
+
+async function handleConsistency() {
+  aiPreview.value = ''
+  previewTitle.value = '一致性检查结果'
+  canApplyPreview.value = false
+  try {
+    await chapterStore.checkConsistency(
+      chapterStore.currentContent,
+      (token) => {
+        aiPreview.value += token
+      }
+    )
+  } catch (e: any) {
+    message.error('检查失败: ' + e.message)
+  }
+}
+
+async function handleWritingAssistant() {
+  aiPreview.value = ''
+  previewTitle.value = '卡文助手建议'
+  canApplyPreview.value = false
+  try {
+    await chapterStore.getWritingSuggestions(
+      chapterStore.currentContent,
+      (token) => {
+        aiPreview.value += token
+      }
+    )
+  } catch (e: any) {
+    message.error('获取建议失败: ' + e.message)
+  }
+}
+
+async function handleGenTitle() {
+  titleOptions.value = []
+  try {
+    const result = await chapterStore.generateTitles(
+      props.chapterOutline,
+      chapterStore.currentContent.slice(0, 500)
+    )
+    const jsonMatch = result.match(/\[[\s\S]*?\]/)
+    if (jsonMatch) {
+      const titles = JSON.parse(jsonMatch[0])
+      if (Array.isArray(titles)) {
+        titleOptions.value = titles
+        message.success('已生成标题建议')
+      }
+    }
+  } catch (e: any) {
+    message.error('生成标题失败: ' + e.message)
+  }
+}
+
+function applyTitle(title: string) {
+  emit('update:title', title)
+  titleOptions.value = []
+  message.success('已应用标题')
+}
+
+function acceptAIPreview() {
+  emit('update:content', aiPreview.value)
+  aiPreview.value = ''
+  message.success('已应用 AI 输出')
+}
+</script>
+
+<style scoped>
+.gen-panel {
+  padding: 12px;
+  overflow-y: auto;
+  height: 100%;
+}
+</style>
+
+
+// ===========================================================
+// 文件路径：src/views/ProjectListView.vue
+// 代码行数：125
+// ===========================================================
+
+<template>
+  <div class="page">
+    <div class="page-header">
+      <h2>我的小说</h2>
+      <n-button type="primary" @click="showCreateModal = true">
+        创建小说
+      </n-button>
+    </div>
+
+    <n-empty v-if="projects.length === 0" description="还没有小说项目，点击上方按钮创建" style="margin-top: 120px;" />
+
+    <div class="project-grid" v-else>
+      <n-card
+        v-for="project in projects"
+        :key="project.name"
+        hoverable
+        class="project-card"
+        @click="openProject(project.name)"
+      >
+        <template #header>
+          <n-ellipsis :line-clamp="1">{{ project.name }}</n-ellipsis>
+        </template>
+        <template #header-extra>
+          <n-popconfirm @positive-click.stop="handleDelete(project.name)">
+            <template #trigger>
+              <n-button quaternary circle size="small" @click.stop>
+                <template #icon><n-icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></n-icon></template>
+              </n-button>
+            </template>
+            确定删除「{{ project.name }}」吗？
+          </n-popconfirm>
+        </template>
+        <n-space vertical size="small">
+          <n-space>
+            <n-tag size="small" type="info">{{ project.type }}</n-tag>
+            <n-tag size="small">{{ project.style }}</n-tag>
+          </n-space>
+          <n-text depth="3" style="font-size: 12px;">
+            目标: {{ formatWordCount(project.targetWordCount) }}
+          </n-text>
+          <n-ellipsis :line-clamp="2" style="font-size: 13px;">
+            {{ project.description || '暂无简介' }}
+          </n-ellipsis>
+        </n-space>
+      </n-card>
+    </div>
+
+    <create-project-modal
+      v-model:show="showCreateModal"
+      @created="handleCreated"
+    />
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
+import { useMessage } from 'naive-ui'
+import { useProjectStore } from '@/stores/project'
+import CreateProjectModal from '@/components/CreateProjectModal.vue'
+
+const router = useRouter()
+const message = useMessage()
+const projectStore = useProjectStore()
+
+const showCreateModal = ref(false)
+
+const projects = projectStore.projects
+
+onMounted(async () => {
+  await projectStore.loadProjectList()
+})
+
+function formatWordCount(count: number): string {
+  if (count >= 10000) return `${(count / 10000).toFixed(0)}万字`
+  return `${count}字`
+}
+
+async function openProject(name: string) {
+  await projectStore.openProject(name)
+  router.push(`/project/${name}`)
+}
+
+async function handleDelete(name: string) {
+  await projectStore.deleteProject(name)
+  message.success('已删除')
+}
+
+async function handleCreated(name: string) {
+  showCreateModal.value = false
+  message.success('创建成功')
+  await projectStore.openProject(name)
+  router.push(`/project/${name}`)
+}
+</script>
+
+<style scoped>
+.page {
+  height: 100%;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.project-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.project-card {
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.project-card:hover {
+  transform: translateY(-2px);
+}
+</style>
+
+
+// ===========================================================
+// 文件路径：src/views/ProjectDetailView.vue
+// 代码行数：38
+// ===========================================================
+
+<template>
+  <div style="height: 100%;">
+    <n-spin :show="loading" style="height: 100%;">
+      <router-view v-if="projectStore.currentProject" />
+      <n-empty v-else-if="!loading" description="项目不存在" style="margin-top: 120px;">
+        <template #extra>
+          <n-button @click="$router.push('/')">返回项目列表</n-button>
+        </template>
+      </n-empty>
+    </n-spin>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { useProjectStore } from '@/stores/project'
+
+const route = useRoute()
+const projectStore = useProjectStore()
+const loading = ref(true)
+
+async function loadProject() {
+  loading.value = true
+  const id = route.params.id as string
+  if (id) {
+    try {
+      await projectStore.openProject(id)
+    } catch {
+      // 项目不存在
+    }
+  }
+  loading.value = false
+}
+
+onMounted(loadProject)
+watch(() => route.params.id, loadProject)
+</script>
+
+
+// ===========================================================
+// 文件路径：src/views/OutlineView.vue
+// 代码行数：156
+// ===========================================================
+
+<template>
+  <div class="outline-page">
+    <n-tabs v-model:value="activeTab" type="line" @update:value="handleTabChange" style="height: 100%;">
+      <n-tab-pane v-for="type in outlineTypes" :key="type" :name="type" :tab="type">
+        <div class="outline-content">
+          <div class="editor-area">
+            <n-input
+              v-model:value="contents[type]"
+              type="textarea"
+              :autosize="{ minRows: 20, maxRows: 50 }"
+              placeholder="在此编写大纲..."
+              @blur="handleSave"
+            />
+            <div class="editor-footer">
+              <n-text depth="3" style="font-size: 12px;">
+                {{ wordCount }} 字 | Ctrl+S 保存
+              </n-text>
+            </div>
+          </div>
+          <div class="ai-panel">
+            <n-space vertical>
+              <n-button block :loading="outlineStore.loading" @click="handlePolish">
+                AI 润色
+              </n-button>
+              <n-button block :loading="outlineStore.loading" @click="handleExpand">
+                AI 扩写
+              </n-button>
+            </n-space>
+
+            <!-- AI Result Preview -->
+            <n-card v-if="aiResult" title="AI 输出" size="small" style="margin-top: 16px;">
+              <n-input
+                v-model:value="aiResult"
+                type="textarea"
+                :autosize="{ minRows: 10, maxRows: 30 }"
+              />
+              <template #action>
+                <n-space justify="end">
+                  <n-button size="small" @click="aiResult = ''">丢弃</n-button>
+                  <n-button size="small" type="primary" @click="acceptAIResult">应用</n-button>
+                </n-space>
+              </template>
+            </n-card>
+          </div>
+        </div>
+      </n-tab-pane>
+    </n-tabs>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, onMounted } from 'vue'
+import { useMessage } from 'naive-ui'
+import { useOutlineStore, type OutlineType } from '@/stores/outline'
+import { countWords } from '@/utils/wordCount'
+
+const message = useMessage()
+const outlineStore = useOutlineStore()
+
+const outlineTypes: OutlineType[] = ['总纲', '世界观', '支线']
+const activeTab = ref<OutlineType>('总纲')
+const aiResult = ref('')
+
+const contents = outlineStore.contents
+
+const wordCount = computed(() => countWords(contents[activeTab.value]))
+
+onMounted(async () => {
+  for (const type of outlineTypes) {
+    await outlineStore.loadOutline(type)
+  }
+})
+
+function handleTabChange(type: OutlineType) {
+  // auto-save previous tab
+  handleSave()
+}
+
+function handleSave() {
+  outlineStore.saveOutline(activeTab.value, contents[activeTab.value])
+}
+
+async function handlePolish() {
+  if (!contents[activeTab.value].trim()) {
+    message.warning('请先编写大纲内容')
+    return
+  }
+  try {
+    aiResult.value = ''
+    const result = await outlineStore.polishOutline(activeTab.value, (token) => {
+      aiResult.value += token
+    })
+    if (!result) aiResult.value = result
+  } catch (e: any) {
+    message.error('润色失败: ' + e.message)
+  }
+}
+
+async function handleExpand() {
+  if (!contents[activeTab.value].trim()) {
+    message.warning('请先编写大纲内容')
+    return
+  }
+  try {
+    aiResult.value = ''
+    await outlineStore.expandOutline(activeTab.value, (token) => {
+      aiResult.value += token
+    })
+  } catch (e: any) {
+    message.error('扩写失败: ' + e.message)
+  }
+}
+
+function acceptAIResult() {
+  contents[activeTab.value] = aiResult.value
+  handleSave()
+  aiResult.value = ''
+  message.success('已应用 AI 输出')
+}
+</script>
+
+<style scoped>
+.outline-page {
+  height: 100%;
+  padding: 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.outline-content {
+  display: flex;
+  gap: 16px;
+  height: calc(100vh - 180px);
+}
+
+.editor-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.editor-area :deep(.n-input) {
+  flex: 1;
+}
+
+.editor-footer {
+  padding: 8px 0;
+}
+
+.ai-panel {
+  width: 240px;
+  flex-shrink: 0;
+  overflow-y: auto;
+}
+</style>
+
+
+// ===========================================================
+// 文件路径：src/views/VolumesView.vue
+// 代码行数：222
+// ===========================================================
+
+<template>
+  <div class="page">
+    <div class="page-header">
+      <h2>卷管理</h2>
+      <n-space>
+        <n-button :loading="splitting" @click="handleAutoSplit">AI 自动分卷</n-button>
+        <n-button type="primary" @click="showCreate = true">创建新卷</n-button>
+      </n-space>
+    </div>
+
+    <n-empty v-if="volumes.length === 0" description="还没有卷，点击上方按钮创建" style="margin-top: 80px;" />
+
+    <div class="volume-grid">
+      <n-card
+        v-for="vol in volumes"
+        :key="vol.id"
+        hoverable
+        class="volume-card"
+        @click="$router.push(`/project/${projectStore.currentProjectName}/chapters/${vol.id}`)"
+      >
+        <template #header>
+          <n-ellipsis :line-clamp="1">{{ vol.name }}</n-ellipsis>
+        </template>
+        <template #header-extra>
+          <n-popconfirm @positive-click.stop="handleDelete(vol)">
+            <template #trigger>
+              <n-button quaternary circle size="small" @click.stop>
+                <template #icon>
+                  <n-icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></n-icon>
+                </template>
+              </n-button>
+            </template>
+            确定删除「{{ vol.name }}」吗？
+          </n-popconfirm>
+        </template>
+        <n-space vertical size="small">
+          <n-ellipsis :line-clamp="2" style="font-size: 13px;">
+            {{ vol.description || '暂无描述' }}
+          </n-ellipsis>
+          <n-text depth="3" style="font-size: 12px;">
+            目标: {{ formatWordCount(vol.targetWordCount) }}
+          </n-text>
+        </n-space>
+      </n-card>
+    </div>
+
+    <!-- Create Volume Modal -->
+    <n-modal v-model:show="showCreate" preset="card" title="创建新卷" style="width: 480px;">
+      <n-form :model="form" label-placement="left" label-width="80">
+        <n-form-item label="卷名">
+          <n-input v-model:value="form.name" placeholder="例: 第一卷：少年出山" />
+        </n-form-item>
+        <n-form-item label="描述">
+          <n-input v-model:value="form.description" type="textarea" :rows="3" placeholder="这卷主要讲什么..." />
+        </n-form-item>
+        <n-form-item label="目标字数">
+          <n-input-number v-model:value="form.targetWordCount" :min="10000" :step="50000" style="width: 100%;" />
+        </n-form-item>
+      </n-form>
+      <template #action>
+        <n-space justify="end">
+          <n-button @click="showCreate = false">取消</n-button>
+          <n-button type="primary" @click="handleCreate">创建</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!-- Auto Split Result Modal -->
+    <n-modal v-model:show="showSplitResult" preset="card" title="AI 自动分卷结果" style="width: 560px;">
+      <n-space vertical size="small">
+        <n-card v-for="(v, i) in splitVolumes" :key="i" size="small">
+          <n-space vertical size="small">
+            <n-input v-model:value="v.name" size="small" placeholder="卷名" />
+            <n-input v-model:value="v.description" type="textarea" :rows="2" placeholder="卷描述" />
+            <n-input-number v-model:value="v.targetWordCount" size="small" :min="10000" :step="50000" />
+          </n-space>
+        </n-card>
+      </n-space>
+      <template #action>
+        <n-space justify="end">
+          <n-button @click="showSplitResult = false">取消</n-button>
+          <n-button type="primary" @click="applySplitVolumes">批量创建</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, reactive, onMounted } from 'vue'
+import { useMessage } from 'naive-ui'
+import { useVolumeStore } from '@/stores/volume'
+import { useProjectStore } from '@/stores/project'
+import { useAIStore } from '@/stores/ai'
+import { callAI } from '@/api/ai'
+import { renderPrompt, BUILTIN_TEMPLATES } from '@/utils/promptTemplates'
+import type { Volume } from '@/types/chapter'
+
+const message = useMessage()
+const volumeStore = useVolumeStore()
+const projectStore = useProjectStore()
+const aiStore = useAIStore()
+
+const volumes = volumeStore.volumes
+const showCreate = ref(false)
+const splitting = ref(false)
+const showSplitResult = ref(false)
+const splitVolumes = ref<Array<{ name: string; description: string; targetWordCount: number }>>([])
+
+const form = reactive({
+  name: '',
+  description: '',
+  targetWordCount: 200000
+})
+
+onMounted(() => volumeStore.loadVolumes())
+
+function formatWordCount(count: number) {
+  return count >= 10000 ? `${(count / 10000).toFixed(0)}万字` : `${count}字`
+}
+
+async function handleCreate() {
+  if (!form.name.trim()) {
+    message.warning('请输入卷名')
+    return
+  }
+  await volumeStore.createVolume({ ...form })
+  showCreate.value = false
+  form.name = ''
+  form.description = ''
+  message.success('创建成功')
+}
+
+async function handleDelete(vol: Volume) {
+  await volumeStore.deleteVolume(vol)
+  message.success('已删除')
+}
+
+async function handleAutoSplit() {
+  if (!aiStore.activeProvider) {
+    message.warning('请先在设置中配置 AI Provider')
+    return
+  }
+  if (!window.electronAPI || !projectStore.currentProjectName) return
+
+  splitting.value = true
+  try {
+    // Load outline
+    const dir = await projectStore.getProjectDir()
+    let outline = ''
+    try {
+      outline = await window.electronAPI.readFile(
+        await window.electronAPI.pathJoin(dir, 'outline', '总纲.md')
+      )
+    } catch {
+      message.warning('请先编写总纲')
+      return
+    }
+
+    const prompt = renderPrompt(BUILTIN_TEMPLATES.AUTO_VOLUME_SPLIT, { outline })
+    const result = await callAI(aiStore.activeProvider, [
+      { role: 'system', content: '你是一名专业的小说编辑。请以纯JSON格式输出。' },
+      { role: 'user', content: prompt }
+    ])
+
+    const jsonMatch = result.match(/\[[\s\S]*\]/)
+    if (!jsonMatch) throw new Error('AI 返回格式不正确')
+    const data = JSON.parse(jsonMatch[0])
+    if (!Array.isArray(data) || data.length === 0) throw new Error('AI 未返回有效的分卷数据')
+
+    splitVolumes.value = data.map((v: any) => ({
+      name: v.name || '',
+      description: v.description || '',
+      targetWordCount: v.targetWordCount || 200000
+    }))
+    showSplitResult.value = true
+  } catch (e: any) {
+    message.error('自动分卷失败: ' + (e.message || '未知错误'))
+  } finally {
+    splitting.value = false
+  }
+}
+
+async function applySplitVolumes() {
+  for (const v of splitVolumes.value) {
+    if (!v.name.trim()) continue
+    await volumeStore.createVolume(v)
+  }
+  showSplitResult.value = false
+  message.success(`已创建 ${splitVolumes.value.length} 个卷`)
+}
+</script>
+
+<style scoped>
+.page {
+  height: 100%;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.volume-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.volume-card {
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.volume-card:hover {
+  transform: translateY(-2px);
+}
+</style>
+
+
+// ===========================================================
+// 文件路径：src/views/ChaptersView.vue
+// 代码行数：123
+// ===========================================================
+
+<template>
+  <div class="page">
+    <div class="page-header">
+      <n-space align="center">
+        <n-button quaternary @click="$router.push(`/project/${projectStore.currentProjectName}/volumes`)">← 返回卷列表</n-button>
+        <h2>{{ volumeName }}</h2>
+      </n-space>
+      <n-button type="primary" @click="showCreate = true">新建章节</n-button>
+    </div>
+
+    <n-empty v-if="chapters.length === 0" description="还没有章节" style="margin-top: 80px;" />
+
+    <n-list v-else bordered>
+      <n-list-item
+        v-for="ch in chapters"
+        :key="ch.id"
+        style="cursor: pointer;"
+        @click="$router.push(`/project/${projectStore.currentProjectName}/chapters/${volumeId}/${ch.id}`)"
+      >
+        <n-thing>
+          <template #header>
+            <n-space align="center">
+              <n-text strong>{{ ch.title }}</n-text>
+              <n-tag size="small" :type="getStatusType(ch.status)">
+                {{ CHAPTER_STATUS_LABELS[ch.status] }}
+              </n-tag>
+            </n-space>
+          </template>
+          <template #description>
+            <n-space>
+              <n-text depth="3" style="font-size: 12px;">{{ ch.wordCount }} 字</n-text>
+              <n-text depth="3" style="font-size: 12px;">{{ ch.filename }}</n-text>
+            </n-space>
+          </template>
+        </n-thing>
+      </n-list-item>
+    </n-list>
+
+    <n-modal v-model:show="showCreate" preset="dialog" title="新建章节">
+      <n-input v-model:value="newTitle" placeholder="章节标题，例: 第一章 少年出山" />
+      <template #action>
+        <n-space>
+          <n-button @click="showCreate = false">取消</n-button>
+          <n-button type="primary" @click="handleCreate">创建</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useMessage } from 'naive-ui'
+import { useChapterStore } from '@/stores/chapter'
+import { useVolumeStore } from '@/stores/volume'
+import { useProjectStore } from '@/stores/project'
+import { CHAPTER_STATUS_LABELS } from '@/types/chapter'
+import type { ChapterStatus } from '@/types/chapter'
+
+const route = useRoute()
+const router = useRouter()
+const message = useMessage()
+const chapterStore = useChapterStore()
+const volumeStore = useVolumeStore()
+const projectStore = useProjectStore()
+
+const volumeId = computed(() => route.params.volumeId as string)
+const volumeName = computed(() => {
+  const vol = volumeStore.volumes.find(v => v.id === volumeId.value)
+  return vol?.name || '未知卷'
+})
+
+const chapters = chapterStore.chapters
+const showCreate = ref(false)
+const newTitle = ref('')
+
+onMounted(async () => {
+  if (volumeStore.volumes.length === 0) {
+    await volumeStore.loadVolumes()
+  }
+  await chapterStore.loadChapters(volumeId.value)
+})
+
+function getStatusType(status: ChapterStatus): 'default' | 'success' | 'info' | 'warning' | 'error' {
+  const map: Record<ChapterStatus, 'default' | 'success' | 'info' | 'warning' | 'error'> = {
+    outline: 'default',
+    generated: 'info',
+    polished: 'warning',
+    de_ai: 'success',
+    final: 'success'
+  }
+  return map[status]
+}
+
+async function handleCreate() {
+  if (!newTitle.value.trim()) {
+    message.warning('请输入标题')
+    return
+  }
+  const ch = await chapterStore.createChapter(volumeId.value, newTitle.value)
+  if (ch) {
+    showCreate.value = false
+    newTitle.value = ''
+    router.push(`/project/${projectStore.currentProjectName}/chapters/${volumeId.value}/${ch.id}`)
+  }
+}
+</script>
+
+<style scoped>
+.page {
+  height: 100%;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+</style>
+
+
+// ===========================================================
+// 文件路径：src/views/ChapterEditorView.vue
+// 代码行数：177
+// ===========================================================
+
+<template>
+  <div class="editor-page" v-if="chapter">
+    <div class="editor-header">
+      <n-space align="center">
+        <n-button quaternary @click="goBack">← 返回</n-button>
+        <n-input
+          v-model:value="chapter.title"
+          style="width: 300px;"
+          placeholder="章节标题"
+          @blur="handleSave"
+        />
+        <n-tag size="small" :type="getStatusType(chapter.status)">
+          {{ CHAPTER_STATUS_LABELS[chapter.status] }}
+        </n-tag>
+      </n-space>
+      <n-space>
+        <n-button size="small" @click="showOutline = !showOutline">
+          {{ showOutline ? '隐藏细纲' : '显示细纲' }}
+        </n-button>
+        <n-button size="small" @click="showAIPanel = !showAIPanel">
+          {{ showAIPanel ? '隐藏AI' : 'AI面板' }}
+        </n-button>
+        <n-button size="small" type="primary" @click="handleSave">保存</n-button>
+      </n-space>
+    </div>
+
+    <div class="editor-body">
+      <!-- Left: Chapter Outline -->
+      <div class="outline-panel" v-if="showOutline">
+        <n-card title="章节细纲" size="small" style="height: 100%;">
+          <n-input
+            v-model:value="chapter.outline"
+            type="textarea"
+            :autosize="{ minRows: 15, maxRows: 40 }"
+            placeholder="在此编写章节细纲..."
+            @blur="handleSave"
+          />
+        </n-card>
+      </div>
+
+      <!-- Center: Markdown Editor -->
+      <div class="main-editor">
+        <markdown-editor
+          v-model="content"
+          :show-preview="true"
+          @save="handleSave"
+        />
+      </div>
+
+      <!-- Right: AI Generation Panel -->
+      <div class="ai-panel" v-if="showAIPanel">
+        <chapter-generation-panel
+          :chapter-outline="chapter.outline"
+          :has-content="content.length > 0"
+          @update:outline="chapter.outline = $event"
+          @update:content="content = $event"
+          @update:title="chapter.title = $event"
+          @set-status="chapter.status = $event as any"
+        />
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useMessage } from 'naive-ui'
+import { useChapterStore } from '@/stores/chapter'
+import { useVolumeStore } from '@/stores/volume'
+import { useProjectStore } from '@/stores/project'
+import { CHAPTER_STATUS_LABELS } from '@/types/chapter'
+import type { ChapterStatus } from '@/types/chapter'
+import MarkdownEditor from '@/components/MarkdownEditor.vue'
+import ChapterGenerationPanel from '@/components/ChapterGenerationPanel.vue'
+
+const route = useRoute()
+const router = useRouter()
+const message = useMessage()
+const chapterStore = useChapterStore()
+const volumeStore = useVolumeStore()
+const projectStore = useProjectStore()
+
+const showOutline = ref(true)
+const showAIPanel = ref(true)
+
+const volumeId = computed(() => route.params.volumeId as string)
+const chapterId = computed(() => route.params.chapterId as string)
+
+const chapter = computed(() =>
+  chapterStore.chapters.find(c => c.id === chapterId.value)
+)
+
+const content = ref('')
+
+onMounted(async () => {
+  if (volumeStore.volumes.length === 0) {
+    await volumeStore.loadVolumes()
+  }
+  if (chapterStore.chapters.length === 0) {
+    await chapterStore.loadChapters(volumeId.value)
+  }
+  if (chapter.value) {
+    await chapterStore.loadChapterContent(volumeId.value, chapter.value.filename)
+    content.value = chapterStore.currentContent
+  }
+})
+
+watch(chapterId, async (newId) => {
+  const ch = chapterStore.chapters.find(c => c.id === newId)
+  if (ch) {
+    await chapterStore.loadChapterContent(volumeId.value, ch.filename)
+    content.value = chapterStore.currentContent
+  }
+})
+
+function getStatusType(status: ChapterStatus): 'default' | 'success' | 'info' | 'warning' {
+  const map: Record<ChapterStatus, 'default' | 'success' | 'info' | 'warning'> = {
+    outline: 'default', generated: 'info', polished: 'warning', de_ai: 'success', final: 'success'
+  }
+  return map[status]
+}
+
+function goBack() {
+  handleSave()
+  router.push(`/project/${projectStore.currentProjectName}/chapters/${volumeId.value}`)
+}
+
+async function handleSave() {
+  if (!chapter.value) return
+  chapterStore.currentContent = content.value
+  await chapterStore.saveChapterContent(volumeId.value, chapter.value)
+}
+</script>
+
+<style scoped>
+.editor-page {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.editor-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 16px;
+  border-bottom: 1px solid #e0e0e6;
+  flex-shrink: 0;
+}
+
+.editor-body {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.outline-panel {
+  width: 260px;
+  flex-shrink: 0;
+  border-right: 1px solid #e0e0e6;
+  padding: 8px;
+  overflow-y: auto;
+}
+
+.main-editor {
+  flex: 1;
+  overflow: hidden;
+}
+
+.ai-panel {
+  width: 280px;
+  flex-shrink: 0;
+  border-left: 1px solid #e0e0e6;
+  overflow-y: auto;
+}
+</style>
+
+
+// ===========================================================
+// 文件路径：src/views/CharactersView.vue
+// 代码行数：162
+// ===========================================================
+
+<template>
+  <div class="page">
+    <div class="page-header">
+      <h2>人物管理</h2>
+      <n-space>
+        <n-button @click="showAIGenerate = true" :loading="characterStore.loading">
+          AI 生成人物
+        </n-button>
+        <n-button type="primary" @click="handleAdd">添加人物</n-button>
+      </n-space>
+    </div>
+
+    <n-empty v-if="characters.length === 0" description="还没有人物" style="margin-top: 80px;" />
+
+    <div class="character-grid">
+      <n-card
+        v-for="char in characters"
+        :key="char.id"
+        hoverable
+        class="character-card"
+        @click="$router.push(`/project/${projectStore.currentProjectName}/characters/${char.id}`)"
+      >
+        <template #header>
+          <n-space align="center">
+            <n-avatar :size="36" :style="{ backgroundColor: getRoleColor(char.role) }">
+              {{ char.name?.charAt(0) || '?' }}
+            </n-avatar>
+            <n-text strong>{{ char.name || '未命名' }}</n-text>
+          </n-space>
+        </template>
+        <template #header-extra>
+          <n-tag size="small" :type="getRoleTagType(char.role)">{{ getRoleLabel(char.role) }}</n-tag>
+        </template>
+        <n-space vertical size="small">
+          <n-text depth="3" style="font-size: 12px;">
+            {{ char.gender }} {{ char.age ? char.age + '岁' : '' }}
+          </n-text>
+          <n-ellipsis :line-clamp="2" style="font-size: 13px;">
+            {{ char.personality || '暂无描述' }}
+          </n-ellipsis>
+        </n-space>
+      </n-card>
+    </div>
+
+    <!-- AI Generate Modal -->
+    <n-modal v-model:show="showAIGenerate" preset="dialog" title="AI 生成人物">
+      <n-input
+        v-model:value="aiHint"
+        type="textarea"
+        :rows="3"
+        placeholder="描述你想要的人物，例如：一个冷酷的剑客，少年时家族被灭，性格阴沉但内心善良"
+      />
+      <template #action>
+        <n-space>
+          <n-button @click="showAIGenerate = false">取消</n-button>
+          <n-button type="primary" :loading="characterStore.loading" @click="handleAIGenerate">生成</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
+import { useMessage } from 'naive-ui'
+import { useCharacterStore } from '@/stores/character'
+import { useProjectStore } from '@/stores/project'
+import { CHARACTER_ROLES } from '@/types/character'
+import type { Character } from '@/types/character'
+
+const router = useRouter()
+const message = useMessage()
+const characterStore = useCharacterStore()
+const projectStore = useProjectStore()
+
+const characters = characterStore.characters
+const showAIGenerate = ref(false)
+const aiHint = ref('')
+
+onMounted(async () => {
+  await characterStore.loadCharacters()
+  await characterStore.loadRelationships()
+})
+
+function getRoleColor(role: string) {
+  const colors: Record<string, string> = {
+    protagonist: '#faad14',
+    antagonist: '#ff4d4f',
+    supporting: '#1890ff',
+    minor: '#8c8c8c'
+  }
+  return colors[role] || '#8c8c8c'
+}
+
+function getRoleLabel(role: string) {
+  return CHARACTER_ROLES.find(r => r.value === role)?.label || '未知'
+}
+
+function getRoleTagType(role: string): 'success' | 'error' | 'info' | 'warning' | 'default' {
+  const types: Record<string, 'success' | 'error' | 'info' | 'warning' | 'default'> = {
+    protagonist: 'warning',
+    antagonist: 'error',
+    supporting: 'info',
+    minor: 'default'
+  }
+  return types[role] || 'default'
+}
+
+function handleAdd() {
+  const char = characterStore.createEmptyCharacter()
+  characterStore.saveCharacter(char)
+  router.push(`/project/${projectStore.currentProjectName}/characters/${char.id}`)
+}
+
+async function handleAIGenerate() {
+  if (!aiHint.value.trim()) {
+    message.warning('请输入人物描述')
+    return
+  }
+  try {
+    const char = await characterStore.generateCharacter(aiHint.value)
+    await characterStore.saveCharacter(char)
+    showAIGenerate.value = false
+    aiHint.value = ''
+    message.success('人物生成成功')
+    router.push(`/project/${projectStore.currentProjectName}/characters/${char.id}`)
+  } catch (e: any) {
+    message.error('生成失败: ' + e.message)
+  }
+}
+</script>
+
+<style scoped>
+.page {
+  height: 100%;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.character-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.character-card {
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.character-card:hover {
+  transform: translateY(-2px);
+}
+</style>
+
+
+// ===========================================================
+// 文件路径：src/views/CharacterDetailView.vue
+// 代码行数：248
+// ===========================================================
+
+<template>
+  <div class="page" v-if="character">
+    <div class="page-header">
+      <n-space align="center">
+        <n-button quaternary @click="$router.back()">← 返回</n-button>
+        <n-avatar :size="40" :style="{ backgroundColor: getRoleColor(character.role) }">
+          {{ character.name?.charAt(0) || '?' }}
+        </n-avatar>
+        <h2>{{ character.name || '编辑人物' }}</h2>
+      </n-space>
+      <n-space>
+        <n-popconfirm @positive-click="handleDelete">
+          <template #trigger>
+            <n-button type="error" quaternary>删除</n-button>
+          </template>
+          确定删除此人物吗？
+        </n-popconfirm>
+        <n-button type="primary" @click="handleSave">保存</n-button>
+      </n-space>
+    </div>
+
+    <n-tabs type="line">
+      <n-tab-pane name="basic" tab="基本信息">
+        <n-form :model="character" label-placement="left" label-width="80" style="max-width: 600px;">
+          <n-form-item label="姓名">
+            <n-input v-model:value="character.name" placeholder="人物姓名" />
+          </n-form-item>
+          <n-form-item label="身份">
+            <n-select v-model:value="character.role" :options="CHARACTER_ROLES" />
+          </n-form-item>
+          <n-form-item label="性别">
+            <n-select v-model:value="character.gender" :options="genderOptions" />
+          </n-form-item>
+          <n-form-item label="年龄">
+            <n-input-number v-model:value="character.age" :min="0" :max="9999" />
+          </n-form-item>
+          <n-form-item label="说话风格">
+            <n-input v-model:value="character.speechStyle" placeholder="例：粗犷豪迈、文雅书生气" />
+          </n-form-item>
+          <n-form-item label="目标">
+            <n-input v-model:value="character.goal" type="textarea" :rows="2" placeholder="这个角色想要什么？" />
+          </n-form-item>
+          <n-form-item label="秘密">
+            <n-input v-model:value="character.secret" type="textarea" :rows="2" placeholder="这个角色隐藏什么秘密？" />
+          </n-form-item>
+        </n-form>
+      </n-tab-pane>
+
+      <n-tab-pane name="personality" tab="性格与背景">
+        <n-form :model="character" label-placement="top" style="max-width: 700px;">
+          <n-form-item label="性格">
+            <n-input v-model:value="character.personality" type="textarea" :rows="4" placeholder="描述角色性格特点..." />
+          </n-form-item>
+          <n-form-item label="背景故事">
+            <n-input v-model:value="character.background" type="textarea" :rows="6" placeholder="角色的过往经历..." />
+          </n-form-item>
+        </n-form>
+      </n-tab-pane>
+
+      <n-tab-pane name="skills" tab="技能与物品">
+        <n-form label-placement="top" style="max-width: 700px;">
+          <n-form-item label="技能">
+            <n-dynamic-tags v-model:value="character.skills" />
+          </n-form-item>
+          <n-form-item label="持有物品">
+            <n-dynamic-tags v-model:value="character.items" />
+          </n-form-item>
+        </n-form>
+      </n-tab-pane>
+
+      <n-tab-pane name="relations" tab="关系">
+        <n-list bordered>
+          <n-list-item v-for="rel in characterRelations" :key="rel.id">
+            <n-thing>
+              <template #header>
+                <n-space align="center">
+                  <n-text strong>{{ getOtherCharName(rel) }}</n-text>
+                  <n-tag size="small" :color="{ color: getRelationColor(rel.type) }">
+                    {{ RELATIONSHIP_LABELS[rel.type] }}
+                  </n-tag>
+                </n-space>
+              </template>
+              <template #description>{{ rel.description }}</template>
+            </n-thing>
+            <template #suffix>
+              <n-button size="small" type="error" quaternary @click="characterStore.removeRelationship(rel.id)">删除</n-button>
+            </template>
+          </n-list-item>
+          <n-list-item v-if="characterRelations.length === 0">
+            <n-text depth="3">暂无关系</n-text>
+          </n-list-item>
+        </n-list>
+        <n-button style="margin-top: 12px;" @click="showAddRelation = true">添加关系</n-button>
+      </n-tab-pane>
+    </n-tabs>
+
+    <!-- Add Relationship Modal -->
+    <n-modal v-model:show="showAddRelation" preset="dialog" title="添加关系">
+      <n-form :model="newRelation" label-placement="left" label-width="80">
+        <n-form-item label="对方">
+          <n-select v-model:value="newRelation.target" :options="otherCharOptions" placeholder="选择人物" />
+        </n-form-item>
+        <n-form-item label="关系类型">
+          <n-select v-model:value="newRelation.type" :options="relationTypeOptions" />
+        </n-form-item>
+        <n-form-item label="描述">
+          <n-input v-model:value="newRelation.description" type="textarea" :rows="2" />
+        </n-form-item>
+        <n-form-item label="强度">
+          <n-slider v-model:value="newRelation.strength" :min="1" :max="10" />
+        </n-form-item>
+      </n-form>
+      <template #action>
+        <n-space>
+          <n-button @click="showAddRelation = false">取消</n-button>
+          <n-button type="primary" @click="handleAddRelation">添加</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, reactive, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useMessage } from 'naive-ui'
+import { useCharacterStore } from '@/stores/character'
+import { useProjectStore } from '@/stores/project'
+import {
+  CHARACTER_ROLES, RELATIONSHIP_LABELS, RELATIONSHIP_COLORS
+} from '@/types/character'
+import type { RelationshipType, Relationship } from '@/types/character'
+
+const route = useRoute()
+const router = useRouter()
+const message = useMessage()
+const characterStore = useCharacterStore()
+const projectStore = useProjectStore()
+
+const showAddRelation = ref(false)
+const newRelation = reactive({
+  target: '',
+  type: 'friend' as RelationshipType,
+  description: '',
+  strength: 5
+})
+
+const character = computed(() => {
+  const id = route.params.charId as string
+  return characterStore.characters.find(c => c.id === id)
+})
+
+const characterRelations = computed(() => {
+  if (!character.value) return []
+  return characterStore.relationships.filter(
+    r => r.source === character.value!.id || r.target === character.value!.id
+  )
+})
+
+const otherCharOptions = computed(() =>
+  characterStore.characters
+    .filter(c => c.id !== character.value?.id)
+    .map(c => ({ label: c.name || '未命名', value: c.id }))
+)
+
+const relationTypeOptions = Object.entries(RELATIONSHIP_LABELS).map(([value, label]) => ({
+  label, value
+}))
+
+const genderOptions = [
+  { label: '男', value: '男' },
+  { label: '女', value: '女' },
+  { label: '其他', value: '其他' }
+]
+
+onMounted(async () => {
+  if (characterStore.characters.length === 0) {
+    await characterStore.loadCharacters()
+  }
+  if (characterStore.relationships.length === 0) {
+    await characterStore.loadRelationships()
+  }
+})
+
+function getRoleColor(role: string) {
+  const colors: Record<string, string> = {
+    protagonist: '#faad14', antagonist: '#ff4d4f',
+    supporting: '#1890ff', minor: '#8c8c8c'
+  }
+  return colors[role] || '#8c8c8c'
+}
+
+function getRelationColor(type: RelationshipType) {
+  return RELATIONSHIP_COLORS[type]
+}
+
+function getOtherCharName(rel: Relationship) {
+  const otherId = rel.source === character.value?.id ? rel.target : rel.source
+  return characterStore.characters.find(c => c.id === otherId)?.name || '未知'
+}
+
+async function handleSave() {
+  if (!character.value) return
+  character.value.updatedAt = new Date().toISOString()
+  await characterStore.saveCharacter(character.value)
+  message.success('已保存')
+}
+
+async function handleDelete() {
+  if (!character.value) return
+  await characterStore.deleteCharacter(character.value)
+  router.push(`/project/${projectStore.currentProjectName}/characters`)
+  message.success('已删除')
+}
+
+function handleAddRelation() {
+  if (!character.value || !newRelation.target) {
+    message.warning('请选择对方人物')
+    return
+  }
+  characterStore.addRelationship({
+    source: character.value.id,
+    target: newRelation.target,
+    type: newRelation.type,
+    description: newRelation.description,
+    strength: newRelation.strength
+  })
+  showAddRelation.value = false
+  newRelation.target = ''
+  newRelation.description = ''
+  message.success('已添加关系')
+}
+</script>
+
+<style scoped>
+.page {
+  height: 100%;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+</style>
+
+
+// ===========================================================
+// 文件路径：src/views/CharacterGraphView.vue
+// 代码行数：382
+// ===========================================================
+
+<template>
+  <div class="graph-page">
+    <div class="page-header">
+      <h2>人物关系图谱</h2>
+      <n-space>
+        <n-button :loading="analyzing" @click="handleAnalyzeRelations" :disabled="characters.length < 2">
+          AI 分析关系
+        </n-button>
+        <n-button @click="handleAddRelation" :disabled="characters.length < 2">添加关系</n-button>
+        <n-select
+          v-model:value="layoutType"
+          :options="layoutOptions"
+          style="width: 120px;"
+          size="small"
+        />
+      </n-space>
+    </div>
+
+    <div ref="containerRef" class="graph-container">
+      <n-empty v-if="characters.length === 0" description="还没有人物，请先创建人物" style="margin-top: 120px;" />
+    </div>
+
+    <!-- Add Relation Modal -->
+    <n-modal v-model:show="showAddRelation" preset="dialog" title="添加关系">
+      <n-form :model="newRel" label-placement="left" label-width="80">
+        <n-form-item label="人物A">
+          <n-select v-model:value="newRel.source" :options="charOptions" placeholder="选择人物" />
+        </n-form-item>
+        <n-form-item label="人物B">
+          <n-select v-model:value="newRel.target" :options="charOptions" placeholder="选择人物" />
+        </n-form-item>
+        <n-form-item label="关系类型">
+          <n-select v-model:value="newRel.type" :options="relationTypeOptions" />
+        </n-form-item>
+        <n-form-item label="描述">
+          <n-input v-model:value="newRel.description" />
+        </n-form-item>
+      </n-form>
+      <template #action>
+        <n-space>
+          <n-button @click="showAddRelation = false">取消</n-button>
+          <n-button type="primary" @click="submitRelation">添加</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!-- AI Analysis Result Modal -->
+    <n-modal v-model:show="showAnalysisResult" preset="card" title="AI 分析的人物关系" style="width: 560px;">
+      <n-space vertical size="small">
+        <n-card v-for="(r, i) in analysisResults" :key="i" size="small">
+          <n-space align="center">
+            <n-text strong>{{ r.source }}</n-text>
+            <n-tag size="small" :color="{ color: RELATIONSHIP_COLORS[r.type as RelationshipType] + '20', textColor: RELATIONSHIP_COLORS[r.type as RelationshipType] }">
+              {{ RELATIONSHIP_LABELS[r.type as RelationshipType] || r.type }}
+            </n-tag>
+            <n-text strong>{{ r.target }}</n-text>
+          </n-space>
+          <n-text depth="3" style="font-size: 12px; margin-top: 4px; display: block;">{{ r.description }}</n-text>
+        </n-card>
+      </n-space>
+      <template #action>
+        <n-space justify="end">
+          <n-button @click="showAnalysisResult = false">取消</n-button>
+          <n-button type="primary" @click="applyAnalysisResults">全部添加</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, onMounted, onUnmounted, watch, reactive, nextTick } from 'vue'
+import { useMessage } from 'naive-ui'
+import { useCharacterStore } from '@/stores/character'
+import { useAIStore } from '@/stores/ai'
+import { useProjectStore } from '@/stores/project'
+import { useChapterStore } from '@/stores/chapter'
+import { useVolumeStore } from '@/stores/volume'
+import { callAI } from '@/api/ai'
+import { renderPrompt, BUILTIN_TEMPLATES } from '@/utils/promptTemplates'
+import { RELATIONSHIP_LABELS, RELATIONSHIP_COLORS } from '@/types/character'
+import type { RelationshipType } from '@/types/character'
+import { Graph } from '@antv/g6'
+
+const message = useMessage()
+const characterStore = useCharacterStore()
+const aiStore = useAIStore()
+const projectStore = useProjectStore()
+const chapterStore = useChapterStore()
+const volumeStore = useVolumeStore()
+
+const containerRef = ref<HTMLElement | null>(null)
+const layoutType = ref('force')
+const showAddRelation = ref(false)
+const showAnalysisResult = ref(false)
+const analyzing = ref(false)
+const analysisResults = ref<Array<{ source: string; target: string; type: string; description: string; strength: number }>>([])
+let graph: Graph | null = null
+
+const characters = characterStore.characters
+const relationships = characterStore.relationships
+
+const newRel = reactive({
+  source: '',
+  target: '',
+  type: 'friend' as RelationshipType,
+  description: ''
+})
+
+const layoutOptions = [
+  { label: '力导向', value: 'force' },
+  { label: '环形', value: 'circular' },
+  { label: '层次', value: 'dagre' }
+]
+
+const charOptions = computed(() =>
+  characters.map(c => ({ label: c.name || '未命名', value: c.id }))
+)
+
+const charNameOptions = computed(() =>
+  characters.map(c => c.name).filter(Boolean)
+)
+
+const relationTypeOptions = Object.entries(RELATIONSHIP_LABELS).map(([value, label]) => ({
+  label, value
+}))
+
+function getGraphData() {
+  return {
+    nodes: characters.map(c => ({
+      id: c.id,
+      data: {
+        label: c.name || '未命名',
+        role: c.role
+      },
+      style: {
+        fill: c.role === 'protagonist' ? '#faad14' : c.role === 'antagonist' ? '#ff4d4f' : '#1890ff',
+        labelFill: '#fff',
+        labelText: c.name || '?'
+      }
+    })),
+    edges: relationships.map(r => ({
+      source: r.source,
+      target: r.target,
+      data: { type: r.type },
+      style: {
+        stroke: RELATIONSHIP_COLORS[r.type] || '#999',
+        lineWidth: Math.max(1, r.strength / 3),
+        labelFontSize: 10,
+        labelText: RELATIONSHIP_LABELS[r.type]
+      }
+    }))
+  }
+}
+
+async function initGraph() {
+  if (!containerRef.value || characters.length === 0) return
+
+  if (graph) {
+    graph.destroy()
+  }
+
+  graph = new Graph({
+    container: containerRef.value,
+    width: containerRef.value.clientWidth,
+    height: containerRef.value.clientHeight,
+    autoFit: 'center',
+    data: getGraphData(),
+    node: {
+      style: {
+        size: 40,
+        labelText: (d: any) => d.data?.label || '?',
+        labelFontSize: 12,
+        labelPlacement: 'bottom',
+        labelOffsetY: 8
+      }
+    },
+    edge: {
+      style: {
+        endArrow: true,
+        labelBackground: true,
+        labelBackgroundFill: '#fff',
+        labelBackgroundOpacity: 0.8,
+        labelPadding: [2, 4],
+        labelText: (d: any) => RELATIONSHIP_LABELS[d.data?.type as RelationshipType] || ''
+      }
+    },
+    layout: {
+      type: layoutType.value === 'force' ? 'force' : layoutType.value,
+      ...(layoutType.value === 'force' ? {
+        linkDistance: 200,
+        nodeStrength: -200,
+        edgeStrength: 0.5,
+        preventOverlap: true
+      } : {}),
+      ...(layoutType.value === 'circular' ? { radius: 200 } : {}),
+      ...(layoutType.value === 'dagre' ? { rankdir: 'TB' } : {})
+    },
+    behaviors: ['drag-canvas', 'zoom-canvas', 'drag-element']
+  })
+
+  await graph.render()
+}
+
+function handleAddRelation() {
+  newRel.source = ''
+  newRel.target = ''
+  newRel.description = ''
+  showAddRelation.value = true
+}
+
+function submitRelation() {
+  if (!newRel.source || !newRel.target || newRel.source === newRel.target) {
+    message.warning('请选择两个不同的人物')
+    return
+  }
+  characterStore.addRelationship({
+    source: newRel.source,
+    target: newRel.target,
+    type: newRel.type,
+    description: newRel.description,
+    strength: 5
+  })
+  showAddRelation.value = false
+  message.success('已添加关系')
+  nextTick(() => initGraph())
+}
+
+async function handleAnalyzeRelations() {
+  if (!aiStore.activeProvider) {
+    message.warning('请先在设置中配置 AI Provider')
+    return
+  }
+
+  analyzing.value = true
+  try {
+    // Load all chapter content
+    if (volumeStore.volumes.length === 0) {
+      await volumeStore.loadVolumes()
+    }
+
+    let allContent = ''
+    for (const vol of volumeStore.volumes) {
+      await chapterStore.loadChapters(vol.id)
+      for (const ch of chapterStore.chapters) {
+        const content = await chapterStore.loadChapterContent(vol.id, ch.filename)
+        if (content) {
+          allContent += `\n\n---${ch.title}---\n${content.slice(0, 2000)}`
+        }
+      }
+    }
+
+    if (!allContent.trim()) {
+      message.warning('没有找到章节内容，请先编写章节')
+      return
+    }
+
+    // Truncate to avoid token overflow
+    allContent = allContent.slice(0, 8000)
+
+    const charList = characters.map(c =>
+      `【${c.name}】${c.role === 'protagonist' ? '主角' : c.role === 'antagonist' ? '反派' : '配角'}`
+    ).join('\n')
+
+    const templates = BUILTIN_TEMPLATES
+    const prompt = renderPrompt(templates.CHARACTER_RELATION_ANALYSIS, {
+      characters: charList,
+      content: allContent
+    })
+
+    const result = await callAI(aiStore.activeProvider, [
+      { role: 'system', content: '你是一名专业的小说编辑。请以纯JSON格式输出。' },
+      { role: 'user', content: prompt }
+    ])
+
+    const jsonMatch = result.match(/\[[\s\S]*\]/)
+    if (!jsonMatch) {
+      message.info('AI 未分析出新关系')
+      return
+    }
+
+    const data = JSON.parse(jsonMatch[0])
+    if (!Array.isArray(data) || data.length === 0) {
+      message.info('AI 未分析出新关系')
+      return
+    }
+
+    // Filter out existing relationships
+    const existingPairs = new Set(
+      relationships.map((r: { source: string; target: string }) => `${r.source}-${r.target}`)
+    )
+
+    // Need to resolve character names to IDs
+    const nameToId = new Map(characters.map(c => [c.name, c.id]))
+
+    analysisResults.value = data
+      .filter((r: any) => {
+        const sourceId = nameToId.get(r.source) || r.source
+        const targetId = nameToId.get(r.target) || r.target
+        return !existingPairs.has(`${sourceId}-${targetId}`) && !existingPairs.has(`${targetId}-${sourceId}`)
+      })
+      .map((r: any) => ({
+        source: r.source,
+        target: r.target,
+        type: r.type || 'friend',
+        description: r.description || '',
+        strength: r.strength || 5
+      }))
+
+    if (analysisResults.value.length === 0) {
+      message.info('未发现新的人物关系')
+    } else {
+      showAnalysisResult.value = true
+    }
+  } catch (e: any) {
+    message.error('分析失败: ' + (e.message || '未知错误'))
+  } finally {
+    analyzing.value = false
+  }
+}
+
+function applyAnalysisResults() {
+  const nameToId = new Map(characters.map(c => [c.name, c.id]))
+
+  for (const r of analysisResults.value) {
+    const sourceId = nameToId.get(r.source) || r.source
+    const targetId = nameToId.get(r.target) || r.target
+    characterStore.addRelationship({
+      source: sourceId,
+      target: targetId,
+      type: r.type as RelationshipType,
+      description: r.description,
+      strength: r.strength
+    })
+  }
+
+  showAnalysisResult.value = false
+  message.success(`已添加 ${analysisResults.value.length} 条关系`)
+  nextTick(() => initGraph())
+}
+
+onMounted(async () => {
+  await characterStore.loadCharacters()
+  await characterStore.loadRelationships()
+  nextTick(() => initGraph())
+})
+
+watch(layoutType, () => initGraph())
+
+watch(() => [characterStore.characters.length, characterStore.relationships.length], () => {
+  nextTick(() => initGraph())
+})
+
+onUnmounted(() => {
+  graph?.destroy()
+  graph = null
+})
+</script>
+
+<style scoped>
+.graph-page {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+
+.graph-container {
+  flex: 1;
+  border: 1px solid #e0e0e6;
+  border-radius: 4px;
+  overflow: hidden;
+}
+</style>
+
+
+// ===========================================================
+// 文件路径：src/views/SettingsView.vue
+// 代码行数：264
+// ===========================================================
+
+<template>
+  <div class="page">
+    <h2>设置</h2>
+    <n-tabs type="line" style="margin-top: 16px;">
+      <!-- AI Provider Tab -->
+      <n-tab-pane name="ai" tab="AI Provider">
+        <div class="tab-header">
+          <n-button type="primary" @click="showAddForm = true">添加 Provider</n-button>
+        </div>
+
+        <n-empty v-if="providers.length === 0 && !showAddForm" description="还没有配置 AI Provider">
+          <template #extra>
+            <n-button type="primary" @click="showAddForm = true">添加</n-button>
+          </template>
+        </n-empty>
+
+        <!-- Add/Edit Form -->
+        <n-card v-if="showAddForm" title="添加 AI Provider" style="margin-bottom: 16px;">
+          <n-form :model="formData" label-placement="left" label-width="100">
+            <n-form-item label="名称">
+              <n-input v-model:value="formData.name" placeholder="例: OpenAI, DeepSeek, 本地Ollama" />
+            </n-form-item>
+            <n-form-item label="Base URL">
+              <n-input v-model:value="formData.baseUrl" placeholder="https://api.openai.com" />
+            </n-form-item>
+            <n-form-item label="API Key">
+              <n-input v-model:value="formData.apiKey" type="password" show-password-on="click" placeholder="sk-..." />
+            </n-form-item>
+            <n-form-item label="模型">
+              <n-input v-model:value="formData.model" placeholder="gpt-4, deepseek-chat" />
+            </n-form-item>
+            <n-form-item label="Temperature">
+              <n-slider v-model:value="formData.temperature" :min="0" :max="2" :step="0.1" />
+            </n-form-item>
+            <n-form-item label="Max Tokens">
+              <n-input-number v-model:value="formData.maxTokens" :min="100" :max="128000" :step="1000" />
+            </n-form-item>
+            <n-form-item label="Top P">
+              <n-slider v-model:value="formData.topP" :min="0" :max="1" :step="0.05" />
+            </n-form-item>
+            <n-form-item label="上下文长度">
+              <n-input-number v-model:value="formData.contextSize" :min="1000" :step="1000" />
+            </n-form-item>
+          </n-form>
+          <template #action>
+            <n-space justify="end">
+              <n-button @click="showAddForm = false">取消</n-button>
+              <n-button @click="handleTest" :loading="testing">测试连接</n-button>
+              <n-button type="primary" @click="handleSave">保存</n-button>
+            </n-space>
+          </template>
+        </n-card>
+
+        <!-- Provider List -->
+        <div class="provider-grid">
+          <n-card v-for="p in providers" :key="p.id" size="small">
+            <template #header>
+              <n-space align="center">
+                <n-text strong>{{ p.name }}</n-text>
+                <n-tag v-if="p.isActive" type="success" size="small">当前使用</n-tag>
+              </n-space>
+            </template>
+            <n-space vertical size="small">
+              <n-text depth="3" style="font-size: 12px;">{{ p.baseUrl }}</n-text>
+              <n-text depth="3" style="font-size: 12px;">模型: {{ p.model }}</n-text>
+            </n-space>
+            <template #action>
+              <n-space>
+                <n-button size="small" :type="p.isActive ? 'success' : 'default'" @click="setActive(p.id)">
+                  {{ p.isActive ? '已激活' : '设为当前' }}
+                </n-button>
+                <n-button size="small" type="error" quaternary @click="handleRemove(p.id)">删除</n-button>
+              </n-space>
+            </template>
+          </n-card>
+        </div>
+      </n-tab-pane>
+
+      <!-- Prompt Templates Tab -->
+      <n-tab-pane name="prompts" tab="Prompt 模板">
+        <n-alert type="info" style="margin-bottom: 16px;" :title="templateHint" />
+
+        <n-empty v-if="!currentProjectName" description="请先打开一个小说项目" />
+
+        <template v-else>
+          <n-space vertical size="medium">
+            <n-card v-for="(content, key) in templates" :key="key" size="small">
+              <template #header>
+                <n-space align="center">
+                  <n-text strong>{{ TEMPLATE_LABELS[key as string] || key }}</n-text>
+                  <n-tag size="tiny" type="info">{{ key }}</n-tag>
+                </n-space>
+              </template>
+              <n-input
+                v-model:value="templates[key]"
+                type="textarea"
+                :autosize="{ minRows: 6, maxRows: 20 }"
+              />
+            </n-card>
+          </n-space>
+
+          <div style="margin-top: 16px; text-align: right;">
+            <n-space>
+              <n-button @click="resetTemplates">恢复默认</n-button>
+              <n-button type="primary" :loading="savingTemplates" @click="saveTemplates">保存模板</n-button>
+            </n-space>
+          </div>
+        </template>
+      </n-tab-pane>
+    </n-tabs>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { useMessage } from 'naive-ui'
+import { useAIStore } from '@/stores/ai'
+import { useProjectStore } from '@/stores/project'
+import { DEFAULT_PROVIDER } from '@/types/ai'
+import { callAINonStream } from '@/api/ai'
+import { BUILTIN_TEMPLATES } from '@/utils/promptTemplates'
+
+const message = useMessage()
+const aiStore = useAIStore()
+const projectStore = useProjectStore()
+
+const providers = aiStore.providers
+const showAddForm = ref(false)
+const testing = ref(false)
+const savingTemplates = ref(false)
+const templateHint = '模板使用 {{变量名}} 作为占位符，编辑后保存到当前项目的 settings/prompt.json。'
+
+const currentProjectName = computed(() => projectStore.currentProjectName)
+
+const formData = reactive({
+  name: '',
+  baseUrl: DEFAULT_PROVIDER.baseUrl,
+  apiKey: '',
+  model: DEFAULT_PROVIDER.model,
+  temperature: DEFAULT_PROVIDER.temperature,
+  maxTokens: DEFAULT_PROVIDER.maxTokens,
+  topP: DEFAULT_PROVIDER.topP,
+  contextSize: DEFAULT_PROVIDER.contextSize
+})
+
+const TEMPLATE_LABELS: Record<string, string> = {
+  OUTLINE_POLISH: '大纲润色',
+  OUTLINE_EXPAND: '大纲扩写',
+  CHAPTER_OUTLINE_GEN: '章节细纲生成',
+  CHAPTER_CONTENT_GEN: '章节正文生成',
+  CHAPTER_POLISH: '章节润色',
+  CHAPTER_DE_AI: '去AI味',
+  CHARACTER_GEN: '人物生成',
+  CHARACTER_RELATION_ANALYSIS: '人物关系分析',
+  CONSISTENCY_CHECK: '一致性检查',
+  CHAPTER_SUMMARY: '章节摘要',
+  WRITING_ASSISTANT: '卡文助手',
+  TITLE_GEN: '标题生成',
+  AI_PROJECT_GEN: 'AI辅助创建项目',
+  AUTO_VOLUME_SPLIT: '自动分卷'
+}
+
+const templates = ref<Record<string, string>>({ ...BUILTIN_TEMPLATES })
+
+onMounted(async () => {
+  await loadProjectTemplates()
+})
+
+watch(currentProjectName, async () => {
+  await loadProjectTemplates()
+})
+
+async function loadProjectTemplates() {
+  if (!window.electronAPI || !projectStore.currentProjectName) return
+  try {
+    const dir = await projectStore.getProjectDir()
+    const content = await window.electronAPI.readFile(
+      await window.electronAPI.pathJoin(dir, 'settings', 'prompt.json')
+    )
+    templates.value = { ...BUILTIN_TEMPLATES, ...JSON.parse(content) }
+  } catch {
+    templates.value = { ...BUILTIN_TEMPLATES }
+  }
+}
+
+async function saveTemplates() {
+  if (!window.electronAPI || !projectStore.currentProjectName) return
+  savingTemplates.value = true
+  try {
+    const dir = await projectStore.getProjectDir()
+    await window.electronAPI.writeFile(
+      await window.electronAPI.pathJoin(dir, 'settings', 'prompt.json'),
+      JSON.stringify(templates.value, null, 2)
+    )
+    message.success('模板已保存')
+  } catch (e: any) {
+    message.error('保存失败: ' + e.message)
+  } finally {
+    savingTemplates.value = false
+  }
+}
+
+function resetTemplates() {
+  templates.value = { ...BUILTIN_TEMPLATES }
+  message.info('已恢复默认模板，请点击保存')
+}
+
+async function handleTest() {
+  testing.value = true
+  try {
+    const result = await callAINonStream(
+      { ...formData, id: '', isActive: false },
+      [{ role: 'user', content: '说"连接成功"' }]
+    )
+    message.success('连接成功: ' + result.slice(0, 50))
+  } catch (e: any) {
+    message.error('连接失败: ' + (e.message || '未知错误'))
+  } finally {
+    testing.value = false
+  }
+}
+
+async function handleSave() {
+  if (!formData.name) {
+    message.warning('请输入名称')
+    return
+  }
+  await aiStore.addProvider({ ...formData, isActive: false })
+  showAddForm.value = false
+  message.success('已保存')
+  formData.name = ''
+  formData.apiKey = ''
+}
+
+async function setActive(id: string) {
+  await aiStore.setActiveProvider(id)
+  message.success('已设为当前 Provider')
+}
+
+async function handleRemove(id: string) {
+  await aiStore.removeProvider(id)
+  message.success('已删除')
+}
+</script>
+
+<style scoped>
+.page {
+  height: 100%;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.tab-header {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 16px;
+}
+
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+</style>
+
+
