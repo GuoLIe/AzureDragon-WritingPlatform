@@ -34,6 +34,7 @@ __pycache__/
 
 # Claude Code runtime
 .claude/scheduled_tasks.lock
+.claude/skills/*/
 
 # Design exploration
 redesign/
