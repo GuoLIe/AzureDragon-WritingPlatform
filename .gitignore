@@ -38,5 +38,11 @@ __pycache__/
 # Design exploration
 redesign/
 
+# Project-specific — 不推送
+/风格/
+/软著申请资料/
+/问题修改.txt
+/需求说明.txt
+
 # Electron
 # app.asar (auto-generated)
